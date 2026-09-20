@@ -1,0 +1,11 @@
+# Never commit case materials or personal data
+case/
+cases/
+*.pdf
+*.docx
+*.ics
+.env
+node_modules/
+dist/
+*.mcpb
+.DS_Store

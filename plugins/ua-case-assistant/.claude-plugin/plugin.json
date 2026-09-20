@@ -1,0 +1,17 @@
+{
+  "name": "ua-case-assistant",
+  "version": "0.1.1",
+  "description": "Помічник у конкретній справі за українським правом для клієнта й адвоката: профіль справи, аналіз, хронологія й докази, процесуальні строки, проєкти документів, перевірка перед поданням, моніторинг справи, пояснення клієнту. Працює в парі з плагіном LEXERY Ukrainian Law (перевірка норм і практики) та Claude in Chrome (доступ до zakon.rada.gov.ua і судових порталів).",
+  "author": {
+    "name": "Ruslan"
+  },
+  "license": "Apache-2.0",
+  "keywords": [
+    "ukraine",
+    "law",
+    "litigation",
+    "case-management",
+    "ukrainian-legal",
+    "cowork"
+  ]
+}

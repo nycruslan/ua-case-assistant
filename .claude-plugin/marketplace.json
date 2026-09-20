@@ -1,0 +1,15 @@
+{
+  "name": "ua-legal",
+  "owner": {
+    "name": "Ruslan"
+  },
+  "description": "Local marketplace for the Ukrainian legal case assistant.",
+  "plugins": [
+    {
+      "name": "ua-case-assistant",
+      "source": "./plugins/ua-case-assistant",
+      "description": "Ukrainian-law case assistant for a client and an advocate: case profile, analysis, chronology and evidence, deadlines, drafting, pre-filing check, monitoring, client explanations.",
+      "version": "0.1.1"
+    }
+  ]
+}
