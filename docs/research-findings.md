@@ -94,6 +94,20 @@ Every item below produced a wrong or misleading answer from a live source, and e
   invisible character itself — that is how a raw NUL once made a source file register as binary `data`.
   Build such characters from code points instead.
 
+### Found by the second stress round (2026-09-21)
+- **ЄДРСР silently ignores a date it cannot parse.** `31/02/2024` returned all 18 rows of a case, unfiltered,
+  which looks exactly like a filtered result. Dates are now calendar-checked (ISO accepted, converted to
+  DD.MM.YYYY) and a reversed range is refused.
+- **Unbounded arguments are a real cost.** A 13 000-character law name held zakon.rada for 57 s until the
+  socket dropped; tools that echo input turned a 20 000-character case number into ~8k tokens. Every free-text
+  argument now has a ceiling far above any real value.
+- **Errors in the model's own input must say so.** They were labelled `http`, so the reminder read "the source
+  did not answer" and sent the model looking for an outage. They are now kind `input`.
+- **A corrupted cache entry crashed the resolver** instead of refetching. Cache entries are shape-checked.
+- **`make_ics.py`: `9999-12-31` overflowed `date` and lost the whole calendar**, and two deadlines with the same
+  action, basis and trigger got one UID, so a calendar kept only one. Years past 2100 are skipped and reported;
+  repeated rows are numbered in date order.
+
 ### Engineering findings that cost real debugging time
 - **Superseded diagnosis, kept as a warning:** roughly a third of Node requests to data.rada died with
   `ECONNRESET` while curl never failed. It was first blamed on connection pooling, and a fresh

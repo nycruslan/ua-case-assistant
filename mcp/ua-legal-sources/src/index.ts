@@ -56,6 +56,19 @@ const server = new McpServer(
 const now = () => new Date().toISOString();
 
 /**
+ * Every free-text argument has a ceiling. Measured: a 13 000-character law name
+ * held zakon.rada for 57 s until the socket dropped, and tools that echo their
+ * input turned a 20 000-character case number into ~8k tokens of reply. The
+ * limits sit far above any real title, query or case number.
+ */
+const NREG = z.string().min(2).max(64);
+const ID = z.string().regex(/^\d{1,12}$/);
+/** ЄДРСР's own format is DD.MM.YYYY; ISO is accepted and converted. */
+const COURT_DATE = z
+  .string()
+  .regex(/^(\d{2}\.\d{2}\.\d{4}|\d{4}-\d{2}-\d{2})$/, "DD.MM.YYYY або YYYY-MM-DD");
+
+/**
  * Every tool returns text; errors are returned as content, not thrown.
  *
  * Compact JSON, not pretty-printed: indentation is pure token cost to the user,
@@ -207,6 +220,7 @@ server.registerTool(
       name: z
         .string()
         .min(2)
+        .max(300)
         .describe(
           "Абревіатура («КУпАП») або початок офіційної назви («Про …»). " +
             "Опис замість назви не працює.",
@@ -231,10 +245,7 @@ server.registerTool(
       "редакції (зокрема ті, що набирають сили «пізніше», за подією). " +
       "Стан акта ≠ стан статті: перевіряй одиницю через rada_unit.",
     inputSchema: {
-      nreg: z
-        .string()
-        .min(2)
-        .describe("Системний номер, напр. «435-15», «8073-10», «254к/96-вр»."),
+      nreg: NREG.describe("Системний номер, напр. «435-15», «8073-10», «254к/96-вр»."),
     },
     annotations: { readOnlyHint: true, openWorldHint: true },
   },
@@ -286,10 +297,11 @@ server.registerTool(
       "номером в акті є кілька різних статей (надрядкові номери в текстовому " +
       "експорті друкуються як звичайні) — тоді не вибирай сам, покажи обидві.",
     inputSchema: {
-      nreg: z.string().min(2).describe("Системний номер акта, напр. «8073-10»."),
+      nreg: NREG.describe("Системний номер акта, напр. «8073-10»."),
       unit: z
         .string()
         .min(1)
+        .max(100)
         .describe("Номер статті або назва структурної одиниці."),
       date: z
         .string()
@@ -395,9 +407,10 @@ server.registerTool(
       "в українських кодексах назва статті майже завжди описує її предмет. " +
       "Фільтр «виключено» показує виключені статті.",
     inputSchema: {
-      nreg: z.string().min(2),
+      nreg: NREG,
       filter: z
         .string()
+        .max(200)
         .optional()
         .describe("Підрядок для фільтрування назв, напр. «спадщин», «виключено»."),
       date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
@@ -443,7 +456,7 @@ server.registerTool(
       "Порожній результат не означає відсутності практики. Цитувати треба " +
       "постанову, до якої прив'язана позиція, а не саму базу.",
     inputSchema: {
-      query: z.string().min(3).describe("Запит українською."),
+      query: z.string().min(3).max(500).describe("Запит українською."),
       semantic: z
         .boolean()
         .optional()
@@ -474,7 +487,7 @@ server.registerTool(
     description:
       "Повний текст правової позиції ВС за її id, разом із прив'язаним " +
       "документом. Перед використанням перевір, чи не було відступу від неї.",
-    inputSchema: { id: z.string().regex(/^\d+$/) },
+    inputSchema: { id: ID },
     annotations: { readOnlyHint: true, openWorldHint: true },
   },
   async ({ id }) =>
@@ -494,7 +507,7 @@ server.registerTool(
       "Пошук в офіційних оглядах практики ВС із посиланням на PDF і сторінку. " +
       "Огляд — узагальнення самого суду, але НЕ джерело права: для аргументу " +
       "цитуй постанову, на яку огляд посилається.",
-    inputSchema: { query: z.string().min(3) },
+    inputSchema: { query: z.string().min(3).max(500) },
     annotations: { readOnlyHint: true, openWorldHint: true },
   },
   async ({ query }) =>
@@ -520,17 +533,19 @@ server.registerTool(
     inputSchema: {
       expression: z
         .string()
+        .max(500)
         .optional()
         .describe("Текстовий запит, напр. «поновлен* прогул*»."),
       case_number: z
         .string()
+        .max(40)
         .optional()
         .describe("ЄУН, напр. «522/2588/23». Для кримінальних — 17-цифровий ЄРДР."),
-      reg_number: z.string().optional(),
-      judge: z.string().optional().describe("Прізвище судді."),
-      court_code: z.string().optional(),
-      date_from: z.string().optional().describe("DD.MM.YYYY"),
-      date_to: z.string().optional().describe("DD.MM.YYYY"),
+      reg_number: z.string().max(20).optional(),
+      judge: z.string().max(100).optional().describe("Прізвище судді."),
+      court_code: z.string().max(20).optional(),
+      date_from: COURT_DATE.optional().describe("DD.MM.YYYY (YYYY-MM-DD теж приймається)"),
+      date_to: COURT_DATE.optional().describe("DD.MM.YYYY (YYYY-MM-DD теж приймається)"),
     },
     annotations: { readOnlyHint: true, openWorldHint: true },
   },
@@ -546,17 +561,17 @@ server.registerTool(
           "Потрібен хоча б один змістовний критерій: expression, " +
             "case_number, reg_number або judge. Порожній пошук у ЄДРСР " +
             "не робиться — це масова вибірка.",
-          "http",
+          "input",
         );
       }
+      const range = edrsr.courtDateRange(args.date_from, args.date_to);
       const r = await edrsr.search({
         expression: args.expression,
         caseNumber: args.case_number,
         regNumber: args.reg_number,
         judge: args.judge,
         courtCode: args.court_code,
-        dateFrom: args.date_from,
-        dateTo: args.date_to,
+        ...range,
       });
       return {
         ...r,
@@ -581,9 +596,9 @@ server.registerTool(
       "документів на питання; вже завантажені читаються безкоштовно. " +
       "Документи ЄДРСР не зберігаються на диск.",
     inputSchema: {
-      id: z.string().regex(/^\d+$/).describe("id документа з edrsr_search."),
+      id: ID.describe("id документа з edrsr_search."),
       mode: z.enum(["head", "operative", "grep", "tail"]).optional(),
-      needle: z.string().optional().describe("Слово для mode=grep."),
+      needle: z.string().max(200).optional().describe("Слово для mode=grep."),
     },
     annotations: { readOnlyHint: true, openWorldHint: true },
   },
@@ -609,7 +624,7 @@ server.registerTool(
       "Автоматично її не обходимо. Цей інструмент віддає покрокову " +
       "інструкцію для клієнта або адвоката, щоб зробити перевірку вручну.",
     inputSchema: {
-      case_number: z.string().optional().describe("ЄУН, якщо відомий."),
+      case_number: z.string().max(40).optional().describe("ЄУН, якщо відомий."),
     },
     annotations: { readOnlyHint: true, openWorldHint: false },
   },

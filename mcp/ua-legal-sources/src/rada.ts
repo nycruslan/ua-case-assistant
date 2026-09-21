@@ -327,7 +327,7 @@ export async function getText(nreg: string, edDate?: string): Promise<LawText> {
   nreg = normalizeNreg(nreg);
   const ed = edDate ? edDate.replace(/-/g, "") : "";
   if (ed && !/^\d{8}$/.test(ed)) {
-    throw new SourceError(`Дата редакції має бути YYYY-MM-DD, отримано «${edDate}».`, "http");
+    throw new SourceError(`Дата редакції має бути YYYY-MM-DD, отримано «${edDate}».`, "input");
   }
   const path = ed
     ? `/laws/show/${encodeNreg(nreg)}/ed${ed}.txt`
@@ -826,15 +826,32 @@ export interface ResolveResult {
  * return instead is sorted by DATE, not relevance, so the act you want may be
  * absent from it entirely. We report that honestly rather than guessing.
  */
+/**
+ * A cached resolver entry, or undefined if it is not a list of nregs.
+ *
+ * ☠️ An unguarded `JSON.parse` here turned one corrupted cache file into a
+ * resolver that failed on every call for a month (the cache TTL).
+ */
+export function parseNregList(body: string): string[] | undefined {
+  try {
+    const v: unknown = JSON.parse(body);
+    return Array.isArray(v) && v.length > 0 && v.every((x) => typeof x === "string")
+      ? v
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export async function resolveNreg(name: string): Promise<string[]> {
   const cacheKey = `resolve:${name.toLowerCase()}`;
   const hit = memGet<string[]>(cacheKey, RESOLVE_TTL);
   if (hit) return hit;
   const disk = await readCache(cacheKey, RESOLVE_TTL);
-  if (disk) {
-    const parsed = JSON.parse(disk.body) as string[];
-    memSet(cacheKey, parsed);
-    return parsed;
+  const cached = disk && parseNregList(disk.body);
+  if (cached) {
+    memSet(cacheKey, cached);
+    return cached;
   }
 
   const res = await request("zakon.rada", {

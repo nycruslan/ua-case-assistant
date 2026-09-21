@@ -24,6 +24,9 @@ import uuid
 from datetime import date, datetime, timedelta, timezone
 
 ISO = re.compile(r"^\s*(\d{4})-(\d{1,2})-(\d{1,2})(?!\d)")
+# No procedural deadline lies this far out: a year past it is a typo («2926»,
+# «9999»), and 9999-12-31 overflowed the date range and lost the whole calendar.
+LAST_PLAUSIBLE_YEAR = 2100
 UKR = re.compile(r"^\s*(\d{1,2})\.(\d{1,2})\.(\d{4})(?!\d)")
 UID_NAMESPACE = uuid.UUID("5b0f7c1e-3f2a-4c55-9d7e-6a1b2c3d4e5f")
 
@@ -60,6 +63,8 @@ def read_date(cell: str):
         if not m:
             return None
         d, mo, y = (int(g) for g in m.groups())
+    if y > LAST_PLAUSIBLE_YEAR:
+        return None, f"{cell.strip()!r}: рік {y} — схоже на помилку набору"
     try:
         return date(y, mo, d), None
     except ValueError as e:
@@ -96,14 +101,27 @@ def parse(path: str):
     return rows, skipped
 
 
-def uid_for(r) -> str:
-    # Deliberately not the date: a recalculated date must UPDATE the event on
-    # re-import, not add a second one next to the stale one.
-    key = "\x1f".join((r["action"], r["basis"], r["trigger"]))
-    return f"{uuid.uuid5(UID_NAMESPACE, key)}@ua-case-assistant"
+def assign_uids(rows) -> None:
+    """Give every row a UID that is stable across runs and unique in the file.
+
+    The date is deliberately left out, so a recalculated date UPDATES the event on
+    re-import instead of adding a second one beside the stale one. But two real
+    deadlines can share action, basis and trigger — two steps from one ruling —
+    and identical UIDs make a calendar keep only one of them. Those are numbered
+    in date order, which stays stable while the table does.
+    """
+    groups = {}
+    for r in rows:
+        groups.setdefault((r["action"], r["basis"], r["trigger"]), []).append(r)
+    for key, members in groups.items():
+        members.sort(key=lambda r: r["date"])
+        for i, r in enumerate(members):
+            name = "\x1f".join(key) + (f"\x1f#{i}" if len(members) > 1 else "")
+            r["uid"] = f"{uuid.uuid5(UID_NAMESPACE, name)}@ua-case-assistant"
 
 
 def build(rows) -> str:
+    assign_uids(rows)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     out = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//ua-case-assistant//deadlines//UK",
            "CALSCALE:GREGORIAN"]
@@ -112,7 +130,7 @@ def build(rows) -> str:
                 f"Статус: {r['status']}\nПеревірте строк з адвокатом.")
         out += [
             "BEGIN:VEVENT",
-            f"UID:{uid_for(r)}",
+            f"UID:{r['uid']}",
             f"DTSTAMP:{stamp}",
             f"DTSTART;VALUE=DATE:{r['date'].strftime('%Y%m%d')}",
             f"DTEND;VALUE=DATE:{(r['date'] + timedelta(days=1)).strftime('%Y%m%d')}",

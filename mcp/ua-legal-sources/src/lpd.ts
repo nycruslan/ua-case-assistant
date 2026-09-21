@@ -160,7 +160,7 @@ export async function searchPositions(
 
 export async function position(id: string): Promise<unknown> {
   if (!/^\d+$/.test(id)) {
-    throw new SourceError(`ЛПД id має бути числом, отримано «${id}».`, "http");
+    throw new SourceError(`ЛПД id має бути числом, отримано «${id}».`, "input");
   }
   return call(`/legal-position/${id}`);
 }

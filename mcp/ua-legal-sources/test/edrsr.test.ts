@@ -12,6 +12,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  courtDateRange,
   filterByCase,
   hasDecision,
   parseFound,
@@ -151,4 +152,24 @@ test("angle brackets are removed before they can trigger the register's HTTP 500
   assert.equal(stripAngles("поновлен* <b>прогул*</b>"), "поновлен* b прогул* /b");
   assert.equal(stripAngles('"поновлення на роботі"'), '"поновлення на роботі"');
   assert.equal(stripAngles(undefined), "");
+});
+
+test("court dates: ISO and native both become DD.MM.YYYY", () => {
+  assert.deepEqual(courtDateRange("2024-01-01", "31.12.2024"), {
+    dateFrom: "01.01.2024",
+    dateTo: "31.12.2024",
+  });
+  assert.deepEqual(courtDateRange(), { dateFrom: undefined, dateTo: undefined });
+});
+
+test("court dates: an impossible date is refused, never sent unfiltered", () => {
+  // ☠️ The register ignores «31.02.2024» and returns every row of the case.
+  assert.throws(() => courtDateRange("31.02.2024"), { kind: "input" });
+  assert.throws(() => courtDateRange(undefined, "2023-02-29"), { kind: "input" });
+});
+
+test("court dates: a reversed range is refused, not reported as zero decisions", () => {
+  assert.throws(() => courtDateRange("01.01.2025", "31.12.2024"), { kind: "input" });
+  // Compared as dates, not as strings: 02.01 is later than 31.12 of the year before.
+  assert.doesNotThrow(() => courtDateRange("31.12.2024", "02.01.2025"));
 });

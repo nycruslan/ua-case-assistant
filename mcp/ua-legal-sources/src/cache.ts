@@ -41,6 +41,10 @@ export async function readCache(
   try {
     const raw = await readFile(keyPath(key), "utf8");
     const entry = JSON.parse(raw) as CachedText;
+    // A truncated or foreign file is a cache miss, never a crash downstream.
+    if (typeof entry?.body !== "string" || typeof entry?.fetchedAt !== "string") {
+      return undefined;
+    }
     if (maxAgeMs !== undefined) {
       const age = Date.now() - Date.parse(entry.fetchedAt);
       if (!Number.isFinite(age) || age > maxAgeMs) return undefined;

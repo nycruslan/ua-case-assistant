@@ -11,10 +11,38 @@
  */
 import { request, SourceError } from "./http.ts";
 import { htmlToText } from "./html.ts";
+import { isRealDate } from "./rada.ts";
 
 export const BASE = "https://reyestr.court.gov.ua";
 /** Unique documents per user question. Re-reading an already-fetched id is free. */
 export const MAX_DOCS = 8;
+
+/**
+ * ☠️ The register silently IGNORES a date it cannot parse (measured: «31/02/2024»
+ * returned all 18 rows of a case, unfiltered), so a bad date would look like a
+ * filtered result. Validate against the calendar and return the native
+ * DD.MM.YYYY; ISO is accepted too. A reversed range is refused as well: it is not
+ * "no decisions", it is a query that cannot match.
+ */
+export function courtDateRange(
+  from?: string,
+  to?: string,
+): { dateFrom?: string; dateTo?: string } {
+  const native = (value?: string) => {
+    if (!value) return undefined;
+    const [d, m, y] = value.includes("-") ? value.split("-").reverse() : value.split(".");
+    if (!isRealDate(`${y}-${m}-${d}`)) {
+      throw new SourceError(`Дати «${value}» немає в календарі.`, "input");
+    }
+    return { native: `${d}.${m}.${y}`, sortable: `${y}${m}${d}` };
+  };
+  const a = native(from);
+  const b = native(to);
+  if (a && b && a.sortable > b.sortable) {
+    throw new SourceError(`date_from ${from} пізніше за date_to ${to}.`, "input");
+  }
+  return { dateFrom: a?.native, dateTo: b?.native };
+}
 
 /**
  * ☠️ Never match on the word "captcha". The CAPTCHA modal (`#modalcaptcha`,
@@ -324,7 +352,7 @@ export async function document(
   needle?: string,
 ): Promise<EdrsrDocResult> {
   if (!/^\d+$/.test(id)) {
-    throw new SourceError(`ЄДРСР id має бути числом, отримано «${id}».`, "http");
+    throw new SourceError(`ЄДРСР id має бути числом, отримано «${id}».`, "input");
   }
 
   expireIdleBudget();
@@ -383,7 +411,7 @@ export async function document(
     }
   } else if (mode === "grep") {
     if (!needle) {
-      throw new SourceError("mode=grep потребує параметра needle.", "http");
+      throw new SourceError("mode=grep потребує параметра needle.", "input");
     }
     const hits: string[] = [];
     const re = new RegExp(

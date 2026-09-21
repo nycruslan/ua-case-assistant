@@ -19,6 +19,7 @@ import {
   normalizeNreg,
   parseCard,
   parseHistory,
+  parseNregList,
   redactionAsOf,
   selectAct,
   sliceUnit,
@@ -553,4 +554,12 @@ test("gibberish matches no real position", () => {
 
 test("short words alone produce no stems, so nothing is filtered on them", () => {
   assert.deepEqual(queryStems("ст 12"), []);
+});
+
+test("resolver cache: only a non-empty list of strings is trusted", () => {
+  assert.deepEqual(parseNregList('["435-15","8073-10"]'), ["435-15", "8073-10"]);
+  // ☠️ A corrupted entry crashed rada_resolve instead of refetching.
+  for (const body of ['"not-an-array"', "[]", "[1,2]", "{", "null"]) {
+    assert.equal(parseNregList(body), undefined, body);
+  }
 });
