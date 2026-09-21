@@ -337,3 +337,34 @@ test("CRLF source text yields clean lines with no stray carriage returns", () =>
   assert.equal(o.context, "Глава 4", "structural context must not keep a \\r");
   assert.match(o.text, /^1\. Перша частина\.$/m);
 });
+
+// ──────────────────────── the sentinel is a family, not one date
+
+test("every year-3000 date is a conditional sentinel, not a date", () => {
+  // ☠️ The regression: КУпАП carries 30000101, 30000102 AND 30000103 — the
+  // registry walks the day to distinguish several pending event-conditional
+  // redactions. Matching only «30000101» reported the others to an advocate as
+  // literal dates «3000-01-02» and «3000-01-03».
+  const reds = parseHistory(
+    "20250101:0:111-20|30000101:0:2147а-19|30000102:0:3077-20|30000103:0:3256-20",
+  );
+  assert.equal(reds.length, 4);
+  const sentinels = reds.filter((r) => r.conditional);
+  assert.equal(sentinels.length, 3, "all three year-3000 entries are sentinels");
+  for (const s of sentinels) {
+    assert.equal(s.date, "невизначена");
+    assert.doesNotMatch(s.date, /3000/, "no year-3000 date may be shown as a date");
+  }
+  // A real date is still a date.
+  const real = reds.find((r) => !r.conditional);
+  assert.equal(real!.date, "2025-01-01");
+});
+
+test("all year-3000 sentinels are classed as future", () => {
+  const { past, future } = splitFuture(
+    parseHistory("30000102:0:a|30000103:0:b|20200101:0:c"),
+    "2026-09-21",
+  );
+  assert.equal(future.length, 2);
+  assert.equal(past.length, 1);
+});

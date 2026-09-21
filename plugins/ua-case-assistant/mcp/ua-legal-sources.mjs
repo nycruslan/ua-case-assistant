@@ -36821,7 +36821,7 @@ function parseHistory(history) {
     if (!chunk.trim()) continue;
     const [date5, , basis = ""] = chunk.split(":");
     if (!/^\d{8}$/.test(date5)) continue;
-    const conditional = date5 === "30000101";
+    const conditional = date5.startsWith("3000");
     out.push({
       date: conditional ? "\u043D\u0435\u0432\u0438\u0437\u043D\u0430\u0447\u0435\u043D\u0430" : isoFromInt(date5),
       raw: date5,

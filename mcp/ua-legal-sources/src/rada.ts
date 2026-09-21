@@ -58,12 +58,12 @@ export interface RadaMeta {
 }
 
 export interface Redaction {
-  /** ISO date, or "невизначена" for the 3000-01-01 sentinel. */
+  /** ISO date, or "невизначена" for a year-3000 sentinel. */
   date: string;
   raw: string;
   /** nregs of the amending acts. */
   basis: string[];
-  /** true when the date is the 3000-01-01 "відбудеться пізніше" sentinel. */
+  /** true when the date is a year-3000 "відбудеться пізніше" sentinel. */
   conditional: boolean;
 }
 
@@ -77,10 +77,16 @@ function isoFromInt(n: number | string | undefined): string {
 /**
  * `history` is a pipe-separated list of `YYYYMMDD:podid:basis1,basis2`.
  *
- * ☠️ The sentinel date 3000-01-01 does not mean "the year 3000". It is how the
+ * ☠️ A date in the year 3000 does not mean "the year 3000". It is how the
  * registry records an adopted amendment whose entry into force depends on an
- * event rather than a date ("відбудеться пізніше"). Reporting it as a date
- * would be wrong; ignoring it would hide a pending change from the advocate.
+ * event rather than a date ("відбудеться пізніше"). Reporting it as a date would
+ * be wrong; ignoring it would hide a pending change from the advocate.
+ *
+ * It is NOT a single value: the registry walks the day to distinguish several
+ * pending event-conditional redactions. Measured — КУпАП carries 30000101,
+ * 30000102 AND 30000103, while ЦК carries only 30000101. Matching the exact
+ * string `30000101` reported the other two as literal dates «3000-01-02» and
+ * «3000-01-03». So the whole year is the sentinel.
  */
 export function parseHistory(history: string): Redaction[] {
   const out: Redaction[] = [];
@@ -88,7 +94,7 @@ export function parseHistory(history: string): Redaction[] {
     if (!chunk.trim()) continue;
     const [date, , basis = ""] = chunk.split(":");
     if (!/^\d{8}$/.test(date)) continue;
-    const conditional = date === "30000101";
+    const conditional = date.startsWith("3000");
     out.push({
       date: conditional ? "невизначена" : isoFromInt(date),
       raw: date,
