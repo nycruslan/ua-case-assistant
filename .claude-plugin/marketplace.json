@@ -1,15 +1,16 @@
 {
   "name": "ua-legal",
   "owner": {
-    "name": "Ruslan"
+    "name": "Ruslan",
+    "url": "https://github.com/nycruslan"
   },
-  "description": "Local marketplace for the Ukrainian legal case assistant.",
+  "description": "Ukrainian legal case assistant: skills plus a local MCP server over the official Ukrainian legal sources.",
   "plugins": [
     {
       "name": "ua-case-assistant",
       "source": "./plugins/ua-case-assistant",
-      "description": "Ukrainian-law case assistant for a client and an advocate: case profile, analysis, chronology and evidence, deadlines, drafting, pre-filing check, monitoring, client explanations.",
-      "version": "0.1.1"
+      "description": "Ukrainian-law case assistant for a client and an advocate: case profile, analysis, chronology and evidence, deadlines, drafting, pre-filing check, monitoring, client explanations. Bundles an MCP server over data.rada.gov.ua open data, the Supreme Court legal-positions database and ЄДРСР.",
+      "version": "0.3.0"
     }
   ]
 }

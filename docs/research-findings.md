@@ -1,7 +1,5 @@
 # Research findings (as of 2026-09-20)
 
-Full guide (living doc): https://claude.ai/code/artifact/28384751-7039-4087-adf1-a33014179ce2
-
 ## Tested from a Cowork cloud session on 2026-09-20
 
 | Target | Claude web fetch | Cowork cloud shell (curl) | Note |
@@ -17,6 +15,92 @@ Full guide (living doc): https://claude.ai/code/artifact/28384751-7039-4087-adf1
 
 Implication: in Cowork, only the browser (Claude in Chrome / built-in browser) or a local MCP server on the
 user's machine can reach these sources reliably. In Claude Code on the user's Mac, the shell has normal network.
+
+## Tested from Claude Code on the Mac, 2026-09-20 (session 2)
+
+The Mac has normal network to every source. All of the below is from live requests, not docs.
+
+| Target | Result | Note |
+|---|---|---|
+| `data.rada.gov.ua/laws/show/<nreg>.json` | 200 | Structured card. `is_archive`, `status`, `datred`, `pidstava`, `edcnt`, `eds[]`, `history` |
+| `data.rada.gov.ua/laws/card/<nreg>` | 200, ~2.7 KB | Carries the status **word** («Стан: Чинний»), so a numeric code never has to be guessed |
+| `data.rada.gov.ua/laws/show/<nreg>.txt` | 200 | Full text. ЦК 1 791 233 B, КУпАП 1 798 791 B |
+| `data.rada.gov.ua/laws/show/<nreg>/ed<YYYYMMDD>.txt` | 200 | **Historical redaction works through open data.** ЦК ed20250101 = 1 717 330 B vs current 1 791 233 B |
+| `data.rada.gov.ua/laws/show/<nreg>/st<N>.txt` | 404 | No unit-level addressing — slice locally from the cached `.txt` |
+| `data.rada.gov.ua/laws/main/r.tsv` | 200, ~240 KB | Machine-readable feed of **recently updated** acts. Useful for monitoring; the whole-corpus list (`/laws/main/a`) is HTML only |
+| `data.rada.gov.ua/laws/find/a?text=…` | 200, empty | The resolver does **not** exist on data.rada — only on zakon.rada |
+| `zakon.rada.gov.ua/laws/card/435-15` with `User-Agent: OpenData` | **403** | The spec said this UA was needed here; for HTML it is refused |
+| same with a browser UA | 200 | So the UA is per-host, not global |
+| `zakon.rada.gov.ua/laws/find/a?text=КУпАП` | 302 → `/laws/main/8073-10,80731-10,80732-10` | The `Location` header IS the answer; no body needed |
+| `lpd-api-prod.court.gov.ua/api/v1/search/text` | 200, 50 positions | No auth |
+| `reyestr.court.gov.ua/` POST `CaseNumber=522/2588/23` | 200, 18 rows, 3 instances | Full case history in one POST |
+| `reyestr.court.gov.ua/Review/124629922` | 200, 48 492 chars | «test (limited) mode» banner present |
+| `court.gov.ua/fair/` search | **reCAPTCHA v2** | See below |
+
+### data.rada is an officially sanctioned API — this settles the robots.txt question
+`robots.txt` on **both** rada hosts is `User-Agent: * → Disallow: /`. But the portal publishes API
+documentation that states plainly: «Доступ до API відбувається анонімно без обмежень», and if the
+infrastructure blocks an IP, you ask the administrator to whitelist it. Documented limits, now honoured
+in code: 60 req/min (with a **requested random 5–7 s pause**), 100 000 req/day, 200 MB/day, 800 000
+pages/day; `User-Agent: OpenData` for anonymous access; `Last-Modified`/`If-Modified-Since` to cut traffic
+(verified: a conditional GET returns 304). Requesting a token or checking limits **before every request is
+forbidden** — such IPs get blocked.
+→ Decision taken: data.rada for everything; zakon.rada for the resolver 302 only.
+
+### court.gov.ua/fair is CAPTCHA-gated — automated case status is not possible
+Inspected in the browser. The page loads reCAPTCHA v2 (explicit render, sitekey
+`6LdIjOQSAAAAAA5VkX2tOq9Znrem2-r_WZi6Jetn`, anchor + bframe iframes). The search form fields are
+`n_case`, `n_proc`, `q_srch`, `region`, `court`, `sdate`, `edate`, `srch`, with a `#search` button.
+Clicking `#search` programmatically produced **zero network requests** — the handler aborts until the
+CAPTCHA is solved. Bypassing it is out of scope and against this project's own rules.
+→ Case status stays a human step. Monitoring *published decisions* by ЄУН through ЄДРСР still works.
+
+### Traps in the law text itself (found by reading the live ЦК, 2026-09-20)
+Each of these produced a confidently WRONG norm, which is the worst failure mode for this tool.
+- **Superscript article numbers print as plain digits.** ст. 48¹ and ст. 481 are both «Стаття 481.» in the
+  `.txt`, and the superscript is unrecoverable. In ЦК four numbers collide this way (481, 961, 991, 1051),
+  each pair being two unrelated norms. Any tool that keeps the first match will silently cite the wrong one.
+- **An excluded article keeps no heading**, only the marker `{Статтю 501 виключено…}` — which therefore sits
+  inside the slice of ст. 50. Matching the marker without comparing article numbers flagged **6 in-force
+  articles of ЦК as repealed**.
+- **11 of 179 exclusion markers spell «Cтаттю» with a LATIN C** (U+0043) instead of Cyrillic С. A
+  Cyrillic-only pattern misses them, so an excluded article reads as live together with its repealed text.
+- **Partial exclusions are not article exclusions**: «Частину четверту статті 32 виключено» (50 of them in
+  ЦК) must not be read as the article being gone. Anchoring the pattern to `{` separates them.
+- **«Глава 4» is a prefix of «Глава 41».** Prefix matching on structural headings produces false ambiguity
+  between unrelated chapters.
+- Byte size is not character count: ЦК is 1 791 233 bytes but 995 799 characters (Cyrillic is 2 bytes in
+  UTF-8). Do not read a size change as a content change.
+
+### Engineering findings that cost real debugging time
+- **Connection pooling breaks data.rada from Node.** With undici's default pool, roughly a third of
+  requests died with `ECONNRESET` while curl succeeded every time. Cause: these hosts close idle
+  keep-alive sockets at about the same 5–7 s mark the portal asks us to wait, so the pool hands out a
+  socket the server is already closing. Fix: a fresh `undici.Agent` per request. This also requires
+  undici's own `fetch` — a dispatcher from the undici package is rejected by Node's built-in `fetch`
+  with `UND_ERR_INVALID_ARG`. `Connection: close` and pinning `Accept-Encoding` did **not** fix it.
+- **`Accept-Encoding: identity` gets the connection reset** by data.rada. Leave encoding to the default.
+- **JavaScript `\b` is ASCII-only**, so `/^(Розділ|Глава)\b/` matches nothing after a Cyrillic letter.
+  Silent failure: articles still resolve, structural units just become unreachable.
+- **`status` is identical (5) on a code and its archived twins.** Only `is_archive` separates them, which
+  makes the structured flag strictly better than parsing «редакції до» out of the title.
+- **`history` ends with the sentinel `30000101`** — not the year 3000, but an adopted amendment whose
+  entry into force depends on an event («відбудеться пізніше»). ЦК has exactly one, basis `3153-20`.
+- **THE root cause of every connection failure: the rada hosts are TLS 1.2-only and drop a TLS 1.3
+  handshake instead of negotiating down.** `data.rada.gov.ua` is a CNAME of `zakon.rada.gov.ua` — one server,
+  193.19.153.66 — and a bare TLS probe shows it: default (1.3 offered) = ECONNRESET, `maxVersion: TLSv1.2` =
+  OK. Node offers 1.3 by default, so requests fail intermittently with ECONNRESET or "Client network socket
+  disconnected before secure TLS connection was established", while curl, which lands on 1.2, never fails.
+  The court hosts (`reyestr`, `lpd-api-prod`) negotiate 1.3 fine, so the cap is applied per host. This had
+  been misdiagnosed as connection pooling: disabling the pool masked it, it did not fix it.
+- Transport errors (only those) are retried up to three times with 2 s and 5 s backoff. A soft rate limit is
+  never retried — retrying is what deepens it.
+- **A documented politeness rule has to be enforced, not assumed.** «One request at a time» needs an actual
+  per-host queue: a delay alone does not stop two concurrent callers reading the same timestamp and firing
+  together.
+- **An MCP client spawns a server without a login shell**, so `node` is absent from PATH when it comes from a
+  version manager. A `.mcp.json` with `"command": "node"` fails with ENOENT, and `"type": "stdio"` is read as
+  the executable name. Launch through a small shell script that resolves the interpreter itself.
 
 ## Claude product facts (official docs, 2026)
 - Plugins: Pro/Max/Team/Enterprise; install via Customize > Plugins (marketplace, upload, GitHub). Hooks and
@@ -75,3 +159,9 @@ user's machine can reach these sources reliably. In Claude Code on the user's Ma
 - https://www.slovoidilo.ua/2026/07/24/novyna/suspilstvo/zelenskyj-pidpysav-ukazy-pro-prodovzhennya-voyennoho-stanu-ta-mobilizacziyi
 - https://suspilne.media/1300335-rada-shvalila-u-persomu-citanni-novij-civilnij-kodeks/
 - https://github.com/anthropics/claude-code/issues/93512
+
+## Sources added in session 2 (verified live from the Mac)
+- https://data.rada.gov.ua/open/main/api — open-data API index («анонімно без обмежень»)
+- https://data.rada.gov.ua/open/main/api/page2 — Last-Modified / If-Modified-Since guidance
+- https://data.rada.gov.ua/open/main/api/page3 — «Законодавство України» endpoints, limits, token rules
+- https://data.rada.gov.ua/robots.txt and https://zakon.rada.gov.ua/robots.txt — both `* → Disallow: /`

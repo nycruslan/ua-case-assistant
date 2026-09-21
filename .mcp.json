@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "ua-legal-sources-dev": {
+      "command": "./mcp/ua-legal-sources/bin/start.sh"
+    }
+  }
+}
