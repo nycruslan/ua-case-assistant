@@ -13,14 +13,20 @@ import { join } from "node:path";
 
 import {
   buildIndex,
+  isRealDate,
   listUnits,
+  MAX_UNIT_CHARS,
+  normalizeNreg,
   parseCard,
   parseHistory,
+  redactionAsOf,
   selectAct,
   sliceUnit,
   splitFuture,
   splitMarkers,
 } from "../src/rada.ts";
+import { encodeNreg } from "../src/http.ts";
+import { mentionsQuery, queryStems } from "../src/lpd.ts";
 
 const F = join(import.meta.dirname, "fixtures");
 const read = (n: string) => readFileSync(join(F, n), "utf8");
@@ -367,4 +373,184 @@ test("all year-3000 sentinels are classed as future", () => {
   );
   assert.equal(future.length, 2);
   assert.equal(past.length, 1);
+});
+
+// ──────────────────────── input hygiene (found by the adversarial run)
+
+const EN_DASH = String.fromCharCode(0x2013);
+const ZWSP = String.fromCharCode(0x200b);
+
+test("normalizeNreg accepts what users actually paste", () => {
+  assert.equal(normalizeNreg(" 435-15 "), "435-15");
+  assert.equal(normalizeNreg(`435${EN_DASH}15`), "435-15");
+  assert.equal(normalizeNreg(`435${ZWSP}-15`), "435-15");
+  assert.equal(normalizeNreg("254к/96-вр"), "254к/96-вр");
+});
+
+test("normalizeNreg refuses path traversal and URL syntax", () => {
+  // ☠️ The regression: `../../laws/main/r` reached /laws/main/r.json on the
+  // state server, because URL resolution normalises `..` away after encoding.
+  for (const bad of [
+    "../../laws/main/r", "435-15/../../x", "./435-15", "/435-15", "435-15/",
+    "435-15?x=1", "435-15#f", "435%2F15", "435 15", "435\\15", "", "a".repeat(65),
+  ]) {
+    assert.throws(() => normalizeNreg(bad), /nreg/, `should refuse ${JSON.stringify(bad)}`);
+  }
+});
+
+test("encodeNreg refuses a dot segment even if a caller skipped normalising", () => {
+  assert.throws(() => encodeNreg("a/../b"));
+  assert.equal(encodeNreg("254к/96-вр"), "254%D0%BA/96-%D0%B2%D1%80");
+});
+
+test("isRealDate rejects dates that do not exist", () => {
+  assert.equal(isRealDate("2024-02-29"), true);
+  for (const d of ["2025-02-29", "2025-02-30", "2025-13-01", "2025-04-31", "2025-00-10"]) {
+    assert.equal(isRealDate(d), false, d);
+  }
+});
+
+// ──────────────────────── which redaction applies on a date
+
+const meta = (history: string, adopted?: string) => ({
+  nreg: "x", nazva: "t", officialNumber: "", statusCode: 5, isArchive: false,
+  currentRedaction: "2026-08-05", adopted, basis: [],
+  redactions: parseHistory(history), futureRedactions: [], totalRedactions: 0,
+});
+
+test("a date before the act's first redaction is 'before', not today's text", () => {
+  // ☠️ The regression: data.rada answered ed19900101 for ЦК (adopted 2003) with
+  // HTTP 200 and TODAY's text, which was then labelled «станом на 1990-01-01».
+  const a = redactionAsOf(meta("20030116:4:|20040101:0:x|20260805:0:y"), "1990-01-01", "2026-09-21");
+  assert.equal(a.kind, "before");
+  assert.equal(a.kind === "before" && a.firstRedaction, "2003-01-16");
+});
+
+test("the redaction in force is the latest one on or before the date", () => {
+  const m = meta("20030116:4:|20040101:0:x|20150206:0:y|20260805:0:z");
+  const between = redactionAsOf(m, "2015-01-01", "2026-09-21");
+  assert.equal(between.kind === "in-force" && between.redaction.date, "2004-01-01");
+  const exact = redactionAsOf(m, "2015-02-06", "2026-09-21");
+  assert.equal(exact.kind === "in-force" && exact.redaction.date, "2015-02-06");
+});
+
+test("a future date is flagged, not silently answered with today's text", () => {
+  assert.equal(redactionAsOf(meta("20260805:0:z"), "2099-01-01", "2026-09-21").kind, "future");
+});
+
+test("no history is not the same as 'did not exist'", () => {
+  assert.equal(redactionAsOf(meta("", "2003-01-16"), "2010-01-01", "2026-09-21").kind, "no-history");
+  assert.equal(redactionAsOf(meta("", "2003-01-16"), "1990-01-01", "2026-09-21").kind, "before");
+});
+
+// ──────────────────────── structural units carry their contents
+
+const STRUCT = [
+  "Книга 1", "Розділ I", "Глава 1",
+  "Стаття 1. Перша", "Текст першої.",
+  "Стаття 2. Друга", "Текст другої.",
+  "Глава 2",
+  "Стаття 3. Третя", "Текст третьої.",
+  "Розділ II", "Глава 3",
+  "Стаття 4. Четверта", "Текст четвертої.",
+].join("\n");
+
+test("a Глава includes its articles and stops at the next Глава", () => {
+  // ☠️ The regression: every structural unit stopped at the first heading of
+  // any kind, so «Книга 5» of ЦК came back as its own title — 480 characters.
+  const o = only(buildIndex(STRUCT), "Глава 1");
+  assert.match(o.text, /Стаття 1/);
+  assert.match(o.text, /Стаття 2/);
+  assert.doesNotMatch(o.text, /Стаття 3/);
+});
+
+test("a Розділ includes its Глави and stops at the next Розділ", () => {
+  const o = only(buildIndex(STRUCT), "Розділ I");
+  assert.match(o.text, /Глава 2/);
+  assert.match(o.text, /Стаття 3/);
+  assert.doesNotMatch(o.text, /Стаття 4/);
+});
+
+test("an article still stops at the next article", () => {
+  const o = only(buildIndex(STRUCT), "1");
+  assert.match(o.text, /Текст першої/);
+  assert.doesNotMatch(o.text, /Стаття 2/);
+});
+
+test("an oversized unit is truncated and says so", () => {
+  const big = "Книга 9\n" + "Стаття 9. Велика\n" + "ї".repeat(MAX_UNIT_CHARS + 5000);
+  const o = only(buildIndex(big), "Книга 9");
+  assert.equal(o.truncated, true);
+  assert.equal(o.text.length, MAX_UNIT_CHARS);
+  assert.ok(o.charCount > MAX_UNIT_CHARS);
+});
+
+test("an article number typed with an en dash is found", () => {
+  const u = sliceUnit(buildIndex("Стаття 111-1. Колабораційна діяльність\nТекст."), `111${EN_DASH}1`);
+  assert.ok(u.found);
+  assert.equal(u.ambiguous, false);
+});
+
+// ──────────────────────── structural addresses as a lawyer types them
+
+const BOOKS = [
+  "КНИГА ПЕРША", "Розділ I", "Глава 1", "Стаття 1. А", "Текст А.",
+  "КНИГА П'ЯТА", "Розділ I", "Глава 50", "Стаття 500. Б", "Текст Б.",
+].join("\n");
+
+test("«Книга 5» finds ЦК's «КНИГА П'ЯТА»", () => {
+  const o = only(buildIndex(BOOKS), "Книга 5");
+  assert.equal(o.heading, "КНИГА П'ЯТА");
+  assert.match(o.text, /Стаття 500/);
+});
+
+test("any apostrophe a user types matches «П'ЯТА»", () => {
+  for (const code of [0x2019, 0x02bc, 0x27]) {
+    const spec = `Книга п${String.fromCharCode(code)}ята`;
+    assert.equal(only(buildIndex(BOOKS), spec).heading, "КНИГА П'ЯТА", `apostrophe U+${code.toString(16)}`);
+  }
+});
+
+test("«Розділ 1» finds «Розділ I», and says it recurs", () => {
+  const u = sliceUnit(buildIndex(BOOKS), "Розділ 1");
+  assert.ok(u.found);
+  assert.equal(u.occurrences.length, 2);
+  assert.equal(u.ambiguous, true);
+  assert.equal(u.ambiguityReason, "repeated");
+});
+
+test("repeated units share ONE size budget, so the answer stays under the cap", () => {
+  // ☠️ The regression: three «Розділ I» in ЦК, each capped separately, summed to
+  // ~26k tokens — over Claude Code's 25k hard limit on a tool result.
+  const huge = "ї".repeat(MAX_UNIT_CHARS);
+  const text = ["Розділ I", huge, "Розділ II", "x", "Розділ I", huge, "Розділ III", "x", "Розділ I", huge].join("\n");
+  const u = sliceUnit(buildIndex(text), "Розділ I");
+  assert.equal(u.occurrences.length, 3);
+  const total = u.occurrences.reduce((n, o) => n + o.text.length, 0);
+  assert.ok(total <= MAX_UNIT_CHARS, `total ${total} > ${MAX_UNIT_CHARS}`);
+  assert.ok(u.occurrences.every((o) => o.truncated));
+});
+
+test("the fallback never shadows a heading written the way it was asked for", () => {
+  const u = sliceUnit(buildIndex("Розділ 1\nТекст.\nРозділ I\nІнше."), "Розділ 1");
+  assert.equal(u.occurrences.length, 1);
+  assert.equal(u.occurrences[0].heading, "Розділ 1");
+});
+
+// ──────────────────────── ЛПД: a search that matched nothing
+
+
+test("query stems survive Ukrainian inflection", () => {
+  assert.deepEqual(queryStems("Поновлення на роботі"), ["понов", "робот"]);
+  assert.ok(mentionsQuery("Працівника поновлено на роботу", queryStems("поновлення на роботі")));
+});
+
+test("gibberish matches no real position", () => {
+  // ☠️ The regression: ЛПД returns ten unrelated positions for «qwzx».
+  const stems = queryStems("qwzx");
+  assert.equal(mentionsQuery("Єдине продовжуване хуліганство (ст. 296 КК)", stems), false);
+});
+
+test("short words alone produce no stems, so nothing is filtered on them", () => {
+  assert.deepEqual(queryStems("ст 12"), []);
 });

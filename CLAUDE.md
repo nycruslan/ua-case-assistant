@@ -18,7 +18,7 @@ Ukrainian. Started in Claude Cowork on 2026-09-20, developed in Claude Code sinc
 - `LICENSE` / `NOTICE` — Apache-2.0, plus attribution owed to LEXERY and to data.rada (CC BY 4.0).
 - `docs/research-findings.md` — verified facts with sources. Ground truth only where marked tested;
   re-check anything else.
-- `templates/case-folder-CLAUDE.md` — copy into the separate, private case folder.
+- `plugins/ua-case-assistant/skills/setup/references/case-folder-CLAUDE.md` — the CLAUDE.md for a private case folder. It ships inside the plugin, because the setup skill copies it on a user's machine where this repo does not exist.
 
 ## Decisions already made
 | Topic | Decision |
@@ -53,6 +53,10 @@ Ukrainian. Started in Claude Cowork on 2026-09-20, developed in Claude Code sinc
   the app to pick up changes.
 - Never loosen a rate limit or the ЄДРСР no-disk-cache rule to make something faster. Those are the contract
   with these sources, and the reasons are in the code comments.
+- Keep every tool result under Claude Code's 25 000-token cap on MCP output (~60 000 Cyrillic chars). Anything
+  that can grow — law units, search results, decision text — is bounded in the server and says when it was cut.
+- Never write `\uXXXX` escapes through an editing tool: parameters are JSON, so they decode into the raw
+  (often invisible) character. Build such characters with `String.fromCharCode` / `chr()`.
 - Network etiquette for Ukrainian state sources is part of the contract: targeted requests only, no bulk
   crawling, ≥1.1 s between ЄДРСР requests, stop on CAPTCHA/block pages, never cache ЄДРСР documents, never
   de-anonymize `ОСОБА_N`.
@@ -70,7 +74,7 @@ claude --plugin-dir ./plugins/ua-case-assistant
 
 For real case work use a separate private folder, never this repo:
 ```bash
-mkdir -p ~/Cases/<case-name> && cp templates/case-folder-CLAUDE.md ~/Cases/<case-name>/CLAUDE.md
+mkdir -p ~/Cases/<case-name> && cp plugins/ua-case-assistant/skills/setup/references/case-folder-CLAUDE.md ~/Cases/<case-name>/CLAUDE.md
 cd ~/Cases/<case-name> && claude    # then: /ua-case-assistant:setup
 ```
 

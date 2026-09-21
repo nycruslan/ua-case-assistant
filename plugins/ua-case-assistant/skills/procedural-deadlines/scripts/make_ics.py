@@ -3,26 +3,40 @@
 
 Usage: python3 make_ics.py DEADLINES.md deadlines.ics
 
-Reads markdown table rows whose first cell is a date (YYYY-MM-DD) and whose status is not
-"ВИКОНАНО". Creates an all-day event per deadline with alarms 7 days and 2 days before.
-Standard library only.
+Reads markdown table rows whose first cell starts with a date and whose status is
+not "ВИКОНАНО", and writes one all-day event per deadline with alarms 7 and 2
+days before. Standard library only; Python 3.8+.
+
+The date may be written as 2026-10-05 or 05.10.2026, and may be followed by a
+note such as "(понеділок)". A row whose date cannot be read is reported and
+skipped, never silently dropped: in a deadlines table a missing row is a missed
+deadline.
+
+Event UIDs are derived from the deadline itself, not random, so re-importing an
+updated file updates the existing events instead of duplicating every one.
+
+Exit codes: 0 every row written; 1 some rows skipped (the file is still written
+for the rest); 2 nothing written (bad arguments, unreadable input, no rows).
 """
 import re
 import sys
 import uuid
 from datetime import date, datetime, timedelta, timezone
 
-DATE_RE = re.compile(r"^\s*(\d{4}-\d{2}-\d{2})\s*$")
+ISO = re.compile(r"^\s*(\d{4})-(\d{1,2})-(\d{1,2})(?!\d)")
+UKR = re.compile(r"^\s*(\d{1,2})\.(\d{1,2})\.(\d{4})(?!\d)")
+UID_NAMESPACE = uuid.UUID("5b0f7c1e-3f2a-4c55-9d7e-6a1b2c3d4e5f")
 
 
 def esc(text: str) -> str:
-    return (text.replace("\\", "\\\\").replace(";", "\;").replace(",", "\\,")
+    """RFC 5545 TEXT escaping."""
+    return (text.replace("\\", "\\\\").replace(";", "\\;").replace(",", "\\,")
             .replace("\n", "\\n"))
 
 
 def fold(line: str) -> str:
-    raw = line.encode("utf-8")
-    if len(raw) <= 75:
+    """Fold to 75 octets per physical line without splitting a UTF-8 character."""
+    if len(line.encode("utf-8")) <= 75:
         return line
     parts, cur = [], b""
     for ch in line:
@@ -35,27 +49,58 @@ def fold(line: str) -> str:
     return "\r\n ".join(parts)
 
 
+def read_date(cell: str):
+    """Return (date, None), (None, reason) for a malformed date, or None if the
+    cell does not start with a date at all (a header or separator row)."""
+    m = ISO.match(cell)
+    if m:
+        y, mo, d = (int(g) for g in m.groups())
+    else:
+        m = UKR.match(cell)
+        if not m:
+            return None
+        d, mo, y = (int(g) for g in m.groups())
+    try:
+        return date(y, mo, d), None
+    except ValueError as e:
+        return None, f"{cell.strip()!r}: {e}"
+
+
 def parse(path: str):
-    rows = []
+    rows, skipped = [], []
     with open(path, encoding="utf-8") as fh:
-        for line in fh:
+        for n, line in enumerate(fh, 1):
             if not line.strip().startswith("|"):
                 continue
             cells = [c.strip() for c in line.strip().strip("|").split("|")]
-            if not cells or not DATE_RE.match(cells[0]):
+            if not cells:
+                continue
+            parsed = read_date(cells[0])
+            if parsed is None:
+                continue
+            when, problem = parsed
+            if problem:
+                skipped.append(f"рядок {n}: некоректна дата {problem}")
                 continue
             status = cells[5] if len(cells) > 5 else ""
             if "ВИКОНАНО" in status.upper():
                 continue
             rows.append({
-                "date": date.fromisoformat(cells[0]),
-                "action": cells[1] if len(cells) > 1 else "Строк",
+                "date": when,
+                "action": cells[1] if len(cells) > 1 and cells[1] else "Строк",
                 "basis": cells[2] if len(cells) > 2 else "",
                 "trigger": cells[3] if len(cells) > 3 else "",
                 "who": cells[4] if len(cells) > 4 else "",
                 "status": status,
             })
-    return rows
+    return rows, skipped
+
+
+def uid_for(r) -> str:
+    # Deliberately not the date: a recalculated date must UPDATE the event on
+    # re-import, not add a second one next to the stale one.
+    key = "\x1f".join((r["action"], r["basis"], r["trigger"]))
+    return f"{uuid.uuid5(UID_NAMESPACE, key)}@ua-case-assistant"
 
 
 def build(rows) -> str:
@@ -67,7 +112,7 @@ def build(rows) -> str:
                 f"Статус: {r['status']}\nПеревірте строк з адвокатом.")
         out += [
             "BEGIN:VEVENT",
-            f"UID:{uuid.uuid4()}@ua-case-assistant",
+            f"UID:{uid_for(r)}",
             f"DTSTAMP:{stamp}",
             f"DTSTART;VALUE=DATE:{r['date'].strftime('%Y%m%d')}",
             f"DTEND;VALUE=DATE:{(r['date'] + timedelta(days=1)).strftime('%Y%m%d')}",
@@ -83,15 +128,42 @@ def build(rows) -> str:
     return "\r\n".join(out) + "\r\n"
 
 
+def die(message: str):
+    print(message, file=sys.stderr)
+    sys.exit(2)
+
+
 def main():
     if len(sys.argv) != 3:
-        sys.exit("Usage: make_ics.py DEADLINES.md output.ics")
-    rows = parse(sys.argv[1])
+        die("Використання: make_ics.py DEADLINES.md output.ics")
+    src, dst = sys.argv[1], sys.argv[2]
+    try:
+        rows, skipped = parse(src)
+    except FileNotFoundError:
+        die(f"Файл не знайдено: {src}")
+    except UnicodeDecodeError:
+        die(f"{src} не в кодуванні UTF-8.")
+
+    for s in skipped:
+        print(f"⚠ ПРОПУЩЕНО — {s}. Виправ дату в DEADLINES.md.", file=sys.stderr)
+
+    today = date.today()
+    for r in sorted(rows, key=lambda r: r["date"]):
+        if r["date"] < today:
+            print(f"⚠ ПРОСТРОЧЕНО: {r['date'].isoformat()} — {r['action']} "
+                  f"(статус «{r['status'] or 'не вказано'}»). Скажи людині негайно.",
+                  file=sys.stderr)
+
     if not rows:
-        sys.exit("No open deadlines with YYYY-MM-DD dates found in the table.")
-    with open(sys.argv[2], "w", encoding="utf-8", newline="") as fh:
-        fh.write(build(rows))
-    print(f"Wrote {len(rows)} event(s) to {sys.argv[2]}")
+        die("Відкритих строків із датою в таблиці не знайдено.")
+
+    try:
+        with open(dst, "w", encoding="utf-8", newline="") as fh:
+            fh.write(build(rows))
+    except OSError as e:
+        die(f"Не вдалося записати {dst}: {e.strerror}")
+    print(f"Записано подій: {len(rows)} → {dst}")
+    sys.exit(1 if skipped else 0)
 
 
 if __name__ == "__main__":

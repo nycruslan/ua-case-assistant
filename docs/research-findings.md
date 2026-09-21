@@ -72,13 +72,34 @@ Each of these produced a confidently WRONG norm, which is the worst failure mode
 - Byte size is not character count: ЦК is 1 791 233 bytes but 995 799 characters (Cyrillic is 2 bytes in
   UTF-8). Do not read a size change as a content change.
 
+### Found by an adversarial user-level stress test (2026-09-21)
+Every item below produced a wrong or misleading answer from a live source, and each is now pinned by a test.
+- **`/ed<date>` never refuses a date.** data.rada answers ЦК as of 1990-01-01 — thirteen years before it was
+  adopted — with HTTP 200 and today's text, byte for byte. The act's own `history` must decide what existed.
+  For a valid date the text returned is the redaction *in force* then (as of 2015-01-01 → the 2014-11-06
+  redaction), so the requested date must never be echoed back as the redaction date.
+- **The year-3000 sentinel is a family**: КУпАП carries 30000101, 30000102 and 30000103 for several pending
+  event-conditional redactions; ЦК carries only 30000101.
+- **ЦК names its books in words** («КНИГА П'ЯТА»), and «Розділ I» recurs in three different books. Users type
+  «Книга 5», «Розділ 1», and any of four apostrophes.
+- **ЄДРСР `/Review/<id>` with no decision** answers HTTP 200 with the bare site shell (~6 KB). A real decision
+  page always carries `id="txtdepository"` / `id="divdocument"`. The register also restricts some real
+  decisions, so a missing container never means "does not exist".
+- **ЄДРСР answers HTTP 500 to anything HTML-shaped** in a search field («поновлен* <b>»). Quotes are fine.
+- **ЛПД's lexical search never returns zero.** Gibberish («qwzx») returns ten real Supreme Court positions on
+  unrelated subjects, a different ten each time. The only signal is that none of them contain a query word.
+- **Claude Code caps an MCP tool result at 25 000 tokens** (warning at 10 000; `MAX_MCP_OUTPUT_TOKENS`).
+  Cyrillic runs ~2.5 characters per token, so a whole Книга of ЦК (489 551 chars) must be bounded server-side.
+- **Tool parameters are JSON.** Writing a regex such as `\u200B` through an editing tool decodes it into the
+  invisible character itself — that is how a raw NUL once made a source file register as binary `data`.
+  Build such characters from code points instead.
+
 ### Engineering findings that cost real debugging time
-- **Connection pooling breaks data.rada from Node.** With undici's default pool, roughly a third of
-  requests died with `ECONNRESET` while curl succeeded every time. Cause: these hosts close idle
-  keep-alive sockets at about the same 5–7 s mark the portal asks us to wait, so the pool hands out a
-  socket the server is already closing. Fix: a fresh `undici.Agent` per request. This also requires
-  undici's own `fetch` — a dispatcher from the undici package is rejected by Node's built-in `fetch`
-  with `UND_ERR_INVALID_ARG`. `Connection: close` and pinning `Accept-Encoding` did **not** fix it.
+- **Superseded diagnosis, kept as a warning:** roughly a third of Node requests to data.rada died with
+  `ECONNRESET` while curl never failed. It was first blamed on connection pooling, and a fresh
+  `undici.Agent` per request appeared to help — but only by chance. The real cause is TLS 1.3 (see «THE root cause»
+  below). `Connection: close`, pinning `Accept-Encoding` and ALPN made no difference. If resets return,
+  check the negotiated TLS version before anything else.
 - **`Accept-Encoding: identity` gets the connection reset** by data.rada. Leave encoding to the default.
 - **JavaScript `\b` is ASCII-only**, so `/^(Розділ|Глава)\b/` matches nothing after a Cyrillic letter.
   Silent failure: articles still resolve, structural units just become unreachable.

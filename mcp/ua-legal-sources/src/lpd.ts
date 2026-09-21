@@ -43,10 +43,41 @@ async function call(path: string, body?: unknown): Promise<unknown> {
 
 export interface Position {
   id: string;
+  /**
+   * Lexical search only: whether any word of the query occurs in this position.
+   * Semantic search matches by meaning, so this is not computed there.
+   */
+  queryTermsFound?: boolean;
   title: string;
+  /** A snippet: search results are for triage; lpd_position has the full text. */
   text: string;
+  /** Set when `text` was shortened to SNIPPET_CHARS. */
+  truncated?: boolean;
   url: string;
   extra: Record<string, string>;
+}
+
+/**
+ * Snippet length per search result. Fifty full positions measured ~14k tokens
+ * and long ones can pass Claude Code's 25k hard cap on a tool result; 600
+ * characters is enough to judge relevance, and bounds a 50-result answer to
+ * roughly 17k tokens in the worst case.
+ */
+export const SNIPPET_CHARS = 600;
+
+/**
+ * Stems of the query's words: the first five letters of each word of three or
+ * more, which survives Ukrainian inflection («поновлення» / «поновлений» →
+ * «понов», «роботі» / «робота» → «робот»).
+ */
+export function queryStems(query: string): string[] {
+  return (query.toLowerCase().match(/[\p{L}]{3,}/gu) ?? []).map((w) => w.slice(0, 5));
+}
+
+/** Does any query stem occur in this text? Case-insensitive. */
+export function mentionsQuery(text: string, stems: string[]): boolean {
+  const t = text.toLowerCase();
+  return stems.some((stem) => t.includes(stem));
 }
 
 export interface SearchResult {
@@ -69,6 +100,7 @@ export async function searchPositions(
     comment: null,
   });
   const raw = items(payload);
+  const stems = semantic ? [] : queryStems(query);
 
   const positions: Position[] = raw
     .filter((it) => it && typeof it === "object")
@@ -78,14 +110,35 @@ export async function searchPositions(
       for (const k of ["approvedAt", "courtName", "documentDate", "status"]) {
         if (it[k] !== undefined && it[k] !== null) extra[k] = String(it[k]);
       }
+      const title = stripTags(it.title ?? it.name);
+      const full = stripTags(it.text ?? it.shortText);
+      const truncated = full.length > SNIPPET_CHARS;
       return {
         id,
-        title: stripTags(it.title ?? it.name),
-        text: stripTags(it.text ?? it.shortText),
+        ...(stems.length ? { queryTermsFound: mentionsQuery(`${title} ${full}`, stems) } : {}),
+        title,
+        text: truncated ? `${full.slice(0, SNIPPET_CHARS)}…` : full,
+        ...(truncated ? { truncated } : {}),
         url: `${SITE}/legal-position/${id}`,
         extra,
       };
     });
+
+  // ☠️ The API never answers «nothing found». Measured: the lexical search for
+  // pure gibberish («qwzx») returns ten real Supreme Court positions on unrelated
+  // subjects — a different ten each time. Passed through, they read as results
+  // and invite citing irrelevant case law. If not one of them contains a word of
+  // the query, the search matched nothing, and that is what we report.
+  if (stems.length && positions.length && positions.every((p) => !p.queryTermsFound)) {
+    return {
+      positions: [],
+      semantic,
+      note:
+        "Жодна з позицій, які повернула ЛПД, не містить слів запиту — це не " +
+        "результати пошуку, а добірка, яку база віддає, коли нічого не знайшла. " +
+        "Спробуй інше формулювання або semantic=true. Це НЕ «практики немає».",
+    };
+  }
 
   return {
     positions,
@@ -94,7 +147,13 @@ export async function searchPositions(
       positions.length === 0
         ? "0 позицій. Це НЕ «практики немає» — спробуй інше формулювання, " +
           "семантичний пошук (semantic=true), дайджести ВС і ЄДРСР."
-        : "Цитуй ПОСТАНОВУ, до якої прив'язана позиція, а не саму ЛПД. " +
+        : (semantic
+            ? "Семантичний пошук повертає найближче за змістом завжди, навіть " +
+              "коли точного збігу немає — перевір, що кожна позиція справді про " +
+              "твоє питання. "
+            : "") +
+          "Це фрагменти для відбору — повний текст позиції дає lpd_position. " +
+          "Цитуй ПОСТАНОВУ, до якої прив'язана позиція, а не саму ЛПД. " +
           "Перевір, чи не було відступу від цієї позиції.",
   };
 }

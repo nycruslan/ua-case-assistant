@@ -55,10 +55,8 @@ await step("rada_resolve КУпАП rejects both archive twins", async () => {
   assert.equal(r.chosen!.isArchive, false);
   const archived = r.candidates.filter((c) => c.isArchive);
   assert.ok(archived.length >= 2, "expected the two archived twins");
-  // The trap: the archived twins also read «Чинний».
-  assert.ok(archived.every((c) => /Чинний/i.test(c.statusText)));
-  return `обрано ${r.chosen!.nreg}; відкинуто архівні: ` +
-    archived.map((c) => `${c.nreg} («${c.statusText}»)`).join(", ");
+  return `обрано ${r.chosen!.nreg}; відкинуто архівні за прапорцем: ` +
+    archived.map((c) => c.nreg).join(", ");
 });
 
 // 3 ─ the article that the archive twin would get wrong

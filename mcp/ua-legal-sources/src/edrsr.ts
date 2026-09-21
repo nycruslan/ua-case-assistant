@@ -33,6 +33,27 @@ const FOUND = /знайдено\s+документів[:\s]*([\d\s  ]+)/i;
  */
 const ZERO = /не\s+знайдено\s+жодного\s+документа/i;
 
+/**
+ * ☠️ The register answers an id it cannot show with HTTP 200 and its bare site
+ * shell (~6 KB, no decision). Measured on /Review/1. Taken at face value, that
+ * shell went back to the model as "the decision's text". A real decision page
+ * always carries its document container; its absence means the id shows no
+ * decision — which may be a nonexistent id OR a decision the register restricts,
+ * so it is never reported as "does not exist".
+ */
+export function hasDecision(html: string): boolean {
+  return /id="(?:txtdepository|divdocument)"/.test(html);
+}
+
+/**
+ * The register's ASP.NET front end answers HTTP 500 to any field that looks like
+ * HTML (measured: «поновлен* <b>»). Angle brackets mean nothing in its query
+ * grammar, so they are removed rather than spending a request that must fail.
+ */
+export function stripAngles(value: string | undefined): string {
+  return (value ?? "").replace(/[<>]/g, " ").replace(/\s+/g, " ").trim();
+}
+
 export interface EdrsrRow {
   id: string;
   /** Форма рішення: Ухвала / Рішення / Постанова / Вирок. */
@@ -143,13 +164,13 @@ export async function search(
   // A search is the start of a new question about the register.
   resetBudget();
   const form: Record<string, string> = {
-    SearchExpression: input.expression ?? "",
-    CaseNumber: input.caseNumber ?? "",
-    RegNumber: input.regNumber ?? "",
-    ChairmenName: input.judge ?? "",
-    UserCourtCode: input.courtCode ?? "",
-    RegDateBegin: input.dateFrom ?? "",
-    RegDateEnd: input.dateTo ?? "",
+    SearchExpression: stripAngles(input.expression),
+    CaseNumber: stripAngles(input.caseNumber),
+    RegNumber: stripAngles(input.regNumber),
+    ChairmenName: stripAngles(input.judge),
+    UserCourtCode: stripAngles(input.courtCode),
+    RegDateBegin: stripAngles(input.dateFrom),
+    RegDateEnd: stripAngles(input.dateTo),
     ImportDateBegin: "",
     ImportDateEnd: "",
     Sort: "0",
@@ -288,8 +309,12 @@ export interface EdrsrDocResult {
  * question asked — head truncation otherwise hides the operative part entirely,
  * which is exactly what «чим закінчилась справа» needs.
  */
-/** Characters returned per slice. A постанова runs to ~95 000. */
-const CHUNK = 30_000;
+/**
+ * Characters returned per slice. A постанова runs to ~95 000; 20 000 keeps one
+ * slice near 8k tokens, the same budget as a law unit, well under Claude Code's
+ * 25k hard cap. Use mode=operative or grep to reach a specific part.
+ */
+const CHUNK = 20_000;
 /** Maximum grep hits returned; more than this is a sign to narrow the needle. */
 const MAX_HITS = 25;
 
@@ -324,6 +349,15 @@ export async function document(
       throw new SourceError(
         "СТОП: реєстр показав блок-сторінку. Обхід не виконується.",
         "blocked",
+      );
+    }
+    // Not counted against the budget: no document was obtained.
+    if (!hasDecision(res.body)) {
+      throw new SourceError(
+        `За id ${id} реєстр не показав тексту рішення: такого документа немає ` +
+          `або доступ до нього обмежено. Це НЕ доказ, що рішення не існує — ` +
+          `перевір id у результатах edrsr_search.`,
+        "unavailable",
       );
     }
     body = htmlToText(res.body);

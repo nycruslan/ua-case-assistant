@@ -104,6 +104,8 @@ async function throttle(host: HostKey) {
 }
 
 export type ErrorKind =
+  | "input"
+  | "unavailable"
   | "http"
   | "cooldown"
   | "headers"
@@ -273,8 +275,11 @@ async function requestOnce(
  * ☠️ The Constitution's nreg is `254к/96-вр`; encoding the slash as %2F gives 404.
  */
 export function encodeNreg(nreg: string): string {
-  return nreg
-    .split("/")
-    .map((seg) => encodeURIComponent(seg))
-    .join("/");
+  const segs = nreg.split("/");
+  // Defence in depth: callers normalise first, but a `..` segment must never
+  // reach a URL — URL resolution would normalise it into a different path.
+  if (segs.some((seg) => seg === "" || seg === "." || seg === "..")) {
+    throw new SourceError(`Недопустимий nreg: «${nreg}».`, "input");
+  }
+  return segs.map((seg) => encodeURIComponent(seg)).join("/");
 }

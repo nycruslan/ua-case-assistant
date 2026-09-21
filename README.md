@@ -44,6 +44,10 @@ verification method these skills build on:
 **Requirements:** a paid Claude plan (plugins), and **Node.js 20+** for the bundled MCP server. Nothing to
 `npm install` — the server ships as one pre-built file with no dependencies.
 
+**Platforms:** tested on macOS. The tools start through a POSIX `sh` launcher, so Linux should behave the
+same; on Windows the ten skills work, but the tools need `sh` on `PATH` (WSL or Git Bash) and are untested
+there.
+
 ## What you get
 
 | Skill | For | Example |
@@ -75,7 +79,7 @@ CASE.md  INDEX.md  CHRONOLOGY.md  EVIDENCE.md  DEADLINES.md  LOG.md
 00_inbox/  01_documents/  02_court/  03_research/  04_drafts/  05_filed/
 ```
 
-`/ua-case-assistant:setup` creates it from [`templates/case-folder-CLAUDE.md`](templates/case-folder-CLAUDE.md).
+`/ua-case-assistant:setup` creates it and drops in [its `CLAUDE.md`](plugins/ua-case-assistant/skills/setup/references/case-folder-CLAUDE.md), which ships inside the plugin.
 
 ## Two things it deliberately will not do
 
@@ -117,7 +121,7 @@ is never de-anonymised or linked across documents.
 
 ```bash
 cd mcp/ua-legal-sources && npm install
-npm test              # 38 unit tests on recorded fixtures, no network
+npm test              # 63 unit tests on recorded fixtures, no network
 npm run check-config  # the repo's dev .mcp.json launches the server
 npm run build         # rebuild the bundle the plugin ships
 npm run check-plugin  # the BUNDLED plugin server, spawned as a client would

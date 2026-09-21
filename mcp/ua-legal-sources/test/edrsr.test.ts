@@ -11,7 +11,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { filterByCase, parseFound, parseRows } from "../src/edrsr.ts";
+import {
+  filterByCase,
+  hasDecision,
+  parseFound,
+  parseRows,
+  stripAngles,
+} from "../src/edrsr.ts";
 import { htmlToText } from "../src/html.ts";
 
 const row = (id: string, caseNumber: string, court: string) =>
@@ -129,4 +135,20 @@ test("htmlToText keeps block boundaries so the operative part stays findable", (
   // The operative marker is matched with ^…$ per line, so it needs its own line.
   assert.match(text, /^ПОСТАНОВИВ:?$/m);
   assert.match(text, /Скаргу задовольнити/);
+});
+
+// ──────────────────────── found by the live stress run
+
+
+test("a page without a decision container is not a decision", () => {
+  // ☠️ The regression: /Review/1 answers HTTP 200 with the bare site shell, and
+  // that shell was returned to the model as «the decision's text».
+  assert.equal(hasDecision("<html><body><div id=\"modalcaptcha\"></div>Меню</body></html>"), false);
+  assert.equal(hasDecision('<div id="divdocument"><textarea id="txtdepository">ПОСТАНОВА</textarea></div>'), true);
+});
+
+test("angle brackets are removed before they can trigger the register's HTTP 500", () => {
+  assert.equal(stripAngles("поновлен* <b>прогул*</b>"), "поновлен* b прогул* /b");
+  assert.equal(stripAngles('"поновлення на роботі"'), '"поновлення на роботі"');
+  assert.equal(stripAngles(undefined), "");
 });

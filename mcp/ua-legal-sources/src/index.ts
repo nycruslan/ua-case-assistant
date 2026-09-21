@@ -29,8 +29,11 @@ import {
   getCard,
   getMeta,
   getText,
+  isRealDate,
   listUnits,
+  MAX_UNIT_CHARS,
   RADA_STATUS_NOTE,
+  redactionAsOf,
   resolve,
   sliceUnit,
 } from "./rada.ts";
@@ -52,11 +55,16 @@ const server = new McpServer(
 
 const now = () => new Date().toISOString();
 
-/** Every tool returns text; errors are returned as content, not thrown. */
+/**
+ * Every tool returns text; errors are returned as content, not thrown.
+ *
+ * Compact JSON, not pretty-printed: indentation is pure token cost to the user,
+ * and Claude Code caps a tool result at 25 000 tokens (warning at 10 000).
+ */
 function ok(payload: unknown) {
   return {
     content: [
-      { type: "text" as const, text: JSON.stringify(payload, null, 2) },
+      { type: "text" as const, text: JSON.stringify(payload) },
     ],
   };
 }
@@ -73,12 +81,17 @@ function fail(err: unknown) {
             error: e?.message ?? String(err),
             kind: e?.kind ?? "unknown",
             verified: false,
+            // An input error never reached a source; saying "the source did not
+            // answer" would send the model looking for an outage.
             reminder:
-              "Джерело не відповіло. Це НЕ підстава відповідати з пам'яті " +
-              "і НЕ доказ відсутності норми чи справи.",
+              e?.kind === "input"
+                ? "Запит не надіслано: виправ вхідні дані й повтори."
+                : e?.kind === "unavailable"
+                  ? "Джерело відповіло, але документа не показало. Не цитуй його " +
+                    "з пам'яті і не стверджуй, що його не існує."
+                  : "Джерело не відповіло. Це НЕ підстава відповідати з пам'яті " +
+                    "і НЕ доказ відсутності норми чи справи.",
           },
-          null,
-          2,
         ),
       },
     ],
@@ -91,6 +104,91 @@ async function guard(fn: () => Promise<unknown>) {
   } catch (err) {
     return fail(err);
   }
+}
+
+/**
+ * The act's text as it stood on `date` — or today — with an honest label.
+ *
+ * ☠️ data.rada answers ANY `/ed<date>` with HTTP 200, including dates before the
+ * act existed (it returns today's text). So the act's own redaction history
+ * decides what to fetch and what to call it; the request date is never echoed
+ * back as though it were the text's redaction.
+ */
+async function textAsOf(rawNreg: string, date?: string) {
+  const meta = await getMeta(rawNreg);
+  const current = () => getText(meta.nreg);
+  if (!date) {
+    return {
+      meta,
+      text: await current(),
+      asOf: null,
+      redactionDate: meta.currentRedaction,
+      note: `Поточна редакція від ${meta.currentRedaction}.`,
+    };
+  }
+  if (!isRealDate(date)) {
+    throw new SourceError(
+      `Дати «${date}» немає в календарі. Перевір день і місяць.`,
+      "input",
+    );
+  }
+  const a = redactionAsOf(meta, date, now().slice(0, 10));
+  if (a.kind === "before") {
+    return { meta, text: null, asOf: date, firstRedaction: a.firstRedaction };
+  }
+  if (a.kind === "future") {
+    const pending = meta.futureRedactions.length;
+    return {
+      meta,
+      text: await current(),
+      asOf: date,
+      redactionDate: meta.currentRedaction,
+      note:
+        `${date} — у майбутньому. Показано чинну сьогодні редакцію від ` +
+        `${meta.currentRedaction}. ` +
+        (pending
+          ? `Уже ухвалено ${pending} майбутніх редакцій, тож на ${date} текст ` +
+            `може бути іншим.`
+          : `Ухвалених майбутніх редакцій реєстр не показує.`),
+    };
+  }
+  if (a.kind === "no-history") {
+    return {
+      meta,
+      text: await current(),
+      asOf: date,
+      redactionDate: meta.currentRedaction,
+      note:
+        `Реєстр не веде історії редакцій цього акта, тож текст станом на ` +
+        `${date} встановити неможливо. Показано поточну редакцію від ` +
+        `${meta.currentRedaction} — НЕ подавай її як текст на ${date}.`,
+    };
+  }
+  const r = a.redaction;
+  // Every date inside one redaction shares one cached download.
+  const isCurrent = r.date === meta.currentRedaction;
+  return {
+    meta,
+    text: isCurrent ? await current() : await getText(meta.nreg, r.date),
+    asOf: date,
+    redactionDate: r.date,
+    note:
+      `Станом на ${date} у реєстрі — редакція від ${r.date}. Чи набрала вона ` +
+      `на ту дату чинності, перевір у прикінцевих положеннях акта.`,
+  };
+}
+
+function beforeExisted(nreg: string, title: string, date: string, first: string) {
+  return {
+    found: false,
+    nreg,
+    act_title: title,
+    as_of: date,
+    message:
+      `На ${date} цього акта в реєстрі ще не було: перша редакція — ${first}. ` +
+      `Тексту станом на цю дату не існує. Якщо відносини виникли раніше, ` +
+      `застосовне право треба шукати в акті, що діяв тоді.`,
+  };
 }
 
 // ──────────────────────────────────────────────────────── legislation tools
@@ -206,18 +304,22 @@ server.registerTool(
   },
   async ({ nreg, unit, date }) =>
     guard(async () => {
-      const text = await getText(nreg, date);
-      const meta = await getMeta(nreg);
+      const t = await textAsOf(nreg, date);
+      const { meta } = t;
+      if (!t.text) {
+        return beforeExisted(meta.nreg, meta.nazva, date!, t.firstRedaction!);
+      }
+      const text = t.text;
       const index = buildIndex(text.body);
       const u = sliceUnit(index, unit);
 
       if (!u.found) {
         return {
           found: false,
-          nreg,
+          nreg: meta.nreg,
           unit,
           message:
-            `Одиницю «${unit}» в акті ${nreg} не знайдено. Це означає «я не ` +
+            `Одиницю «${unit}» в акті ${meta.nreg} не знайдено. Це означає «я не ` +
             `знайшов за цією адресою», а не «такої норми не існує». ` +
             `Ставки, перехідні й прикінцеві положення часто живуть у пунктах ` +
             `ПІДРОЗДІЛІВ, а не в статтях. Скористайся rada_list_units, щоб ` +
@@ -239,34 +341,42 @@ server.registerTool(
           : undefined,
         amendment_markers: o.markers,
         char_count: o.charCount,
+        truncated_warning: o.truncated
+          ? `Одиниця завелика: показано перші ${o.text.length} із ${o.charCount} ` +
+            `знаків. Для цитування звузь адресу до окремої статті чи глави ` +
+            `(зміст — rada_list_units).`
+          : undefined,
       }));
 
       return {
         found: true,
-        nreg,
+        nreg: meta.nreg,
         act_title: meta.nazva,
         is_archive: meta.isArchive,
         unit: u.unit,
         ambiguous: u.ambiguous,
         ambiguity_warning: !u.ambiguous
           ? undefined
-          : u.ambiguityReason === "flattened"
+          : u.ambiguityReason === "repeated"
+            ? `«${u.unit}» в акті ${meta.nreg} трапляється ${occurrences.length} ` +
+              `рази — у різних частинах (див. поле context). Уточни, яку саме ` +
+              `потрібно, або звузь адресу до глави чи статті.`
+            : u.ambiguityReason === "flattened"
             ? `☠️ НЕОДНОЗНАЧНО: статті, надрукованої як «${unit}», в акті ` +
-              `${nreg} немає. Показано те, що надруковано без дефіса. ` +
+              `${meta.nreg} немає. Показано те, що надруковано без дефіса. ` +
               `У текстовому експорті надрядкові номери втрачають позначку, ` +
               `тому це може бути як ст. ${unit}, так і окрема стаття з таким ` +
               `номером. НЕ цитуй, не підтвердивши за карткою акта, що це та ` +
               `сама норма.`
-            : `☠️ НЕОДНОЗНАЧНО: під номером «${u.unit}» в акті ${nreg} є ` +
+            : `☠️ НЕОДНОЗНАЧНО: під номером «${u.unit}» в акті ${meta.nreg} є ` +
               `${occurrences.length} різні одиниці — надрядковий номер ` +
               `(напр. ст. 48-1) друкується так само, як звичайний (ст. 481). ` +
               `НЕ вибирай сам: покажи користувачу обидві (поле context — різні ` +
               `глави) і запитай, яка потрібна.`,
         occurrences,
-        redaction_date: date ? text.redaction : meta.currentRedaction,
-        redaction_note: date
-          ? `Текст у редакції станом на ${text.redaction}.`
-          : `Поточна редакція від ${meta.currentRedaction}.`,
+        as_of: t.asOf,
+        redaction_date: t.redactionDate,
+        redaction_note: t.note,
         future_redactions: meta.futureRedactions.length,
         source_url: text.sourceUrl,
         retrieved_at: text.retrievedAt,
@@ -296,11 +406,18 @@ server.registerTool(
   },
   async ({ nreg, filter, date }) =>
     guard(async () => {
-      const text = await getText(nreg, date);
+      const t = await textAsOf(nreg, date);
+      if (!t.text) {
+        return beforeExisted(t.meta.nreg, t.meta.nazva, date!, t.firstRedaction!);
+      }
+      const text = t.text;
       const index = buildIndex(text.body);
       const all = listUnits(index, filter);
       return {
-        nreg,
+        nreg: t.meta.nreg,
+        as_of: t.asOf,
+        redaction_date: t.redactionDate,
+        redaction_note: t.note,
         filter: filter ?? null,
         total_articles: index.articles.size,
         total_structural: index.structural.length,
