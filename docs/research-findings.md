@@ -108,6 +108,30 @@ Every item below produced a wrong or misleading answer from a live source, and e
   action, basis and trigger got one UID, so a calendar kept only one. Years past 2100 are skipped and reported;
   repeated rows are numbered in date order.
 
+### Found by running a real case end to end (2026-09-21)
+A fictional civil case (loan on a receipt, partial repayment, Viber acknowledgment, demand letter, court
+ruling, the opponent's response as a scan) in 11 formats, worked through the skills as a client would.
+- **Reading files with built-in tools only (tested on macOS).** PDF, scanned PDF, JPG and PNG: `Read`
+  directly. **HEIC: `Read` returns ~125k tokens of binary** — convert with `sips` first. DOCX: `Read` refuses;
+  `textutil -convert txt` works (also RTF, DOC, ODT). XLSX: raw `unzip` is useless when text is stored inline
+  as numeric entities; a stdlib `python3` reader handles both layouts. EML: encoded subject needs the `email`
+  module. Audio: unreadable — flag for transcription. A fresh Mac has no `python-docx`, `openpyxl`, PIL,
+  `pdftotext` or `tesseract`, so skills must not assume them.
+- **`textutil` HTML→DOCX without `<meta charset="utf-8">` produces mojibake** («ÐŸÐ ÐžÐ„»).
+- **ЦК's «ПРИКІНЦЕВІ ТА ПЕРЕХІДНІ ПОЛОЖЕННЯ» was unreachable** by any unit address, although the martial-law
+  and quarantine rules on limitation and ст. 625 live there. Fixed; see the server README.
+- **Legal facts the case turned on, verified live** (not memory — each one a model is likely to get wrong):
+  п. 19 ПіПП ЦК read «строки… продовжуються на строк його дії» until 2024-01-29, «перебіг позовної давності…
+  зупиняється» from 2024-01-30 (Закон № 3450-IX), and was **excluded from 2025-09-04** (Закон № 4434-IX).
+  п. 18 ПіПП ЦК frees a borrower from ст. 625 for delay during martial law, and КЦС ВС applies it to loans
+  (постанова від 31.01.2024, № 183/7850/22, ЄДРСР 116840099). Neither party in the test case had raised it.
+- **The "after 17:00" delivery rule (ЦПК ст. 272 ч. 6) covers court decisions only**, not documents from
+  other parties.
+- **The name of a martial-law extension law does not resolve**: dozens share it. A law № N-IX has nreg `N-20`,
+  № N-VIII has `N-19` (verified on 4434-IX, 2102-IX, 2541-VIII).
+- **Removed as redundant**: `case_status_instructions` (a tool returning fixed text — now in the
+  `case-monitor` skill) and `make_ics.py` (Claude writes the .ics from the skill's template).
+
 ### Engineering findings that cost real debugging time
 - **Superseded diagnosis, kept as a warning:** roughly a third of Node requests to data.rada died with
   `ECONNRESET` while curl never failed. It was first blamed on connection pooling, and a fresh

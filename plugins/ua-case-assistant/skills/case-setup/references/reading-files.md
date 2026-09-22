@@ -1,0 +1,42 @@
+# Як прочитати файл справи вбудованими засобами
+
+Перевірено 2026-09-21 на реальних форматах. Нічого не встановлюй: усе нижче вже є в Claude або в системі.
+Оригінал ніколи не змінюй. Проміжні файли клади в `${TMPDIR:-/tmp}`, не в теку справи (вона синхронізується).
+
+| Формат | Як читати | Пастка |
+|---|---|---|
+| PDF (текст або скан) | `Read` напряму. Понад 10 сторінок — параметр `pages` порціями до 20 | Скан Claude читає зором сам; окремий OCR не потрібен. Нечитабельне — познач у «Примітки», не вгадуй |
+| JPG, PNG, WEBP, GIF | `Read` напряму | Фото документа під кутом читається; дрібний текст перевір повторно |
+| HEIC, HEIF (фото з iPhone), TIFF | ☠️ **Ніколи не `Read` напряму** — повертає десятки тисяч токенів двійкового сміття. macOS: `sips -s format jpeg "<файл>" --out "${TMPDIR:-/tmp}/<ім'я>.jpg"`, потім `Read` цього JPG | Інша ОС — попроси людину зберегти фото як JPG |
+| DOCX, DOC, RTF, ODT | macOS: `textutil -convert txt -stdout "<файл>"`. Інша ОС, лише DOCX: `unzip -p "<файл>" word/document.xml` і читай текст між тегами. Якщо є вбудований скіл docx — можна ним | `Read` відмовляє для DOCX. Таблиці й колонтитули можуть зливатися — звір із PDF-версією, якщо вона є |
+| XLSX | Скрипт нижче (лише стандартна бібліотека `python3`). Немає `python3` — вбудований скіл xlsx, якщо є; інакше попроси експорт у CSV | Дата у вигляді числа (`44972`) — серійна дата Excel: 1899-12-30 + N днів. Суми — як у файлі, без округлення. XLS (старий двійковий) — попроси зберегти як XLSX або CSV |
+| CSV, TXT, MD, JSON, HTML (експорт Telegram/WhatsApp) | `Read` напряму | Кодування cp1251 дає «кракозябри» → `iconv -f cp1251 -t utf-8 "<файл>"` |
+| EML (лист) | `Read` напряму. Заголовки `=?UTF-8?B?…?=` і тіло в base64 декодуй: `python3 -c "import email,sys;from email import policy;m=email.message_from_bytes(open(sys.argv[1],'rb').read(),policy=policy.default);print(m['subject']);print(m.get_body().get_content())" "<файл>"` | Вкладення — окремі документи: витягни їх у `00_inbox/` і проіндексуй кожне. MSG (Outlook) — попроси зберегти як PDF або EML |
+| Аудіо, відео (M4A, MP3, OGG, OPUS, MP4, MOV) | **Прослухати чи переглянути не можна.** Внеси в `INDEX.md` з тривалістю (`afinfo` на macOS або `file`) і позначкою «потрібна розшифровка», попроси людину надіслати текст | Не вгадуй зміст з назви файлу чи з чужих слів — у хронологію йде лише як «(зі слів клієнта)», доки нема розшифровки. Оригінал файлу — сам доказ: скажи зберегти його незмінним |
+| ZIP | `unzip -o "<архів>" -d "00_inbox/<ім'я архіву>/"`, далі кожен файл окремо | RAR, 7z — попроси людину розпакувати |
+| Pages, Numbers, Keynote | Попроси експортувати в PDF | Це архіви без надійного текстового шару |
+
+## Метадані, які варто записати
+
+- Дата документа — з тексту, не з назви файлу чи дати створення. Розбіжність — у «Примітки».
+- Для фото й скріншотів: що саме на них видно (месенджер, відправник, дата повідомлення), чи видно номер
+  телефону або акаунт — від цього залежить, чи прийме суд електронний доказ.
+- Для електронних доказів: оригінал чи копія, де зберігається оригінал (телефон, хмара, пошта).
+
+## XLSX без сторонніх бібліотек
+
+```bash
+python3 - "<файл.xlsx>" <<'PY'
+import sys, zipfile, xml.etree.ElementTree as ET
+z = zipfile.ZipFile(sys.argv[1]); n = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+ss = [''.join(t.text or '' for t in si.iter(n+'t')) for si in ET.fromstring(z.read('xl/sharedStrings.xml')).iter(n+'si')] if 'xl/sharedStrings.xml' in z.namelist() else []
+for name in sorted(f for f in z.namelist() if f.startswith('xl/worksheets/sheet')):
+    print('##', name)
+    for row in ET.fromstring(z.read(name)).iter(n+'row'):
+        cells = []
+        for c in row.iter(n+'c'):
+            v = c.find(n+'v')
+            cells.append(ss[int(v.text)] if c.get('t') == 's' else ''.join(t.text or '' for t in c.iter(n+'t')) if c.get('t') == 'inlineStr' else (v.text if v is not None else ''))
+        print(' | '.join(cells))
+PY
+```

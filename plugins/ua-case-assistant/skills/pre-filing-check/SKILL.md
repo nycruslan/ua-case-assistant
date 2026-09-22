@@ -7,8 +7,6 @@ description: >
   документі", "чи існують ці постанови". It audits every legal citation live, checks facts against the case
   file, checks formal requirements, deadlines, attachments and personal data, and returns a clear verdict for
   the advocate.
-metadata:
-  version: "0.1.0"
 ---
 
 # Перевірка перед поданням

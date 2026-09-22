@@ -6,8 +6,6 @@ description: >
   налаштування", "чи все працює", "чи підключені інструменти", "з чого почати", "створи папку справи",
   "нова папка справи", "підготуй робоче місце", "/setup". It checks which sources are reachable, creates
   the private case folder from the template, and hands over to case-setup.
-metadata:
-  version: "0.4.0"
 ---
 
 # Налаштування робочого місця

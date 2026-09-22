@@ -9,7 +9,7 @@
  * editorial — they are not to be bypassed.
  */
 import { request, SourceError } from "./http.ts";
-import { stripTags } from "./html.ts";
+import { htmlToText, stripTags } from "./html.ts";
 
 export const SITE = "https://lpd.court.gov.ua";
 
@@ -158,11 +158,54 @@ export async function searchPositions(
   };
 }
 
-export async function position(id: string): Promise<unknown> {
+export interface PositionRecord {
+  title: string;
+  text: string;
+  /** false when the base itself marks the position as no longer valid. */
+  valid: boolean;
+  /** The base's own flag, e.g. a departure note; null when it has none. */
+  mark: unknown;
+  /** The decisions to cite — the base is only the index to them. */
+  decisions: {
+    title: string;
+    case_number: string;
+    date: string;
+    edrsr_id: string | null;
+    edrsr_url: string | null;
+  }[];
+  linked_positions: number[];
+}
+
+/**
+ * One position, reduced to what a citation needs.
+ *
+ * ☠️ The raw record is HTML plus internal bookkeeping (category join rows with
+ * timestamps for every category), roughly half of it noise that costs the user
+ * context on every call. The decisions keep their ЄДРСР id, because the ruling,
+ * not the base, is what gets cited.
+ */
+export async function position(id: string): Promise<PositionRecord> {
   if (!/^\d+$/.test(id)) {
     throw new SourceError(`ЛПД id має бути числом, отримано «${id}».`, "input");
   }
-  return call(`/legal-position/${id}`);
+  const raw = (await call(`/legal-position/${id}`)) as Record<string, any>;
+  const docs = Array.isArray(raw?.documents) ? raw.documents : [];
+  return {
+    title: stripTags(raw?.title),
+    text: htmlToText(String(raw?.text ?? "")),
+    valid: raw?.status !== false,
+    mark: raw?.mark ?? null,
+    decisions: docs.map((d: Record<string, any>) => ({
+      title: stripTags(d?.title),
+      case_number: String(d?.caseNumber ?? ""),
+      date: String(d?.law_date ?? ""),
+      edrsr_id: d?.doc_id ? String(d.doc_id) : null,
+      edrsr_url: d?.doc_id ? `https://reyestr.court.gov.ua/Review/${d.doc_id}` : null,
+    })),
+    linked_positions: (Array.isArray(raw?.linkedLegalPositions) ? raw.linkedLegalPositions : [])
+      .map((l: Record<string, any>) => Number(l?.id))
+      .filter(Number.isFinite),
+  };
 }
 
 export interface DigestHit {

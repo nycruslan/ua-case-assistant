@@ -7,7 +7,7 @@ Ukrainian. Started in Claude Cowork on 2026-09-20, developed in Claude Code sinc
 ## Layout
 - `plugins/ua-case-assistant/` — the plugin (10 skills, Ukrainian) and the bundled MCP server it ships.
 - `.claude-plugin/marketplace.json` — local marketplace `ua-legal`, so the plugin installs in Claude Code.
-- `mcp/ua-legal-sources/` — SOURCE of the MCP server (10 tools). **Read its README before changing
+- `mcp/ua-legal-sources/` — SOURCE of the MCP server (9 tools). **Read its README before changing
   anything**: the per-host TLS cap, request policy, fail-safe archive handling and article-number collision
   handling all encode findings that cost real debugging.
 - `plugins/ua-case-assistant/mcp/ua-legal-sources.mjs` — the committed bundle the plugin ships, built from

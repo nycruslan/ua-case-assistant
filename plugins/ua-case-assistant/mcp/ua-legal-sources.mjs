@@ -36988,7 +36988,15 @@ async function getText(nreg, edDate) {
 }
 var ARTICLE = /^Стаття\s+(\d+(?:-\d+)?)\s*\.?/;
 var STRUCTURAL = /^(Книга|Розділ|Глава|Підрозділ|Параграф)(?=[\s:.]|$)/iu;
+var FINAL_PROVISIONS = /^(?:[IVXІХ]+\.\s*)?(?:(?:ПРИКІНЦЕВІ|ЗАКЛЮЧНІ)(?:\s+ТА\s+ПЕРЕХІДНІ)?|ПЕРЕХІДНІ)\s+ПОЛОЖЕННЯ\s*$/iu;
+var FINAL_WORDS = /(прикінцев|перехідн|заключн)/iu;
+var POINT = /(?:^|\s|,)(?:п\.|пункт|пп\.)\s*(\d+(?:-\d+)?)(?=$|[\s,])/iu;
+var SIGNATURE = /^(Президент України|Голова Верховної Ради України|Прем'єр-міністр України)\s*$/u;
+var POINT_LINE = /^(\d+(?:-\d+)?)\.\s/;
 var LEVEL = {
+  // Final provisions close the whole act, so nothing but another top-level
+  // section may end them.
+  final: 1,
   \u043A\u043D\u0438\u0433\u0430: 1,
   \u0440\u043E\u0437\u0434\u0456\u043B: 2,
   \u043F\u0456\u0434\u0440\u043E\u0437\u0434\u0456\u043B: 3,
@@ -37003,7 +37011,8 @@ function levelOf(line) {
   const l = plainDashes(line);
   if (ARTICLE.test(l)) return ARTICLE_LEVEL;
   const m = STRUCTURAL.exec(l);
-  return m ? LEVEL[m[1].toLowerCase()] : void 0;
+  if (m) return LEVEL[m[1].toLowerCase()];
+  return FINAL_PROVISIONS.test(l.trim()) ? LEVEL.final : void 0;
 }
 var MAX_UNIT_CHARS = 2e4;
 var MAX_MARKERS = 40;
@@ -37075,7 +37084,9 @@ function buildIndex(text) {
       else articles.set(num, [i]);
       return;
     }
-    if (STRUCTURAL.test(l)) structural.push({ label: raw.trim(), line: i });
+    if (STRUCTURAL.test(l) || FINAL_PROVISIONS.test(l.trim())) {
+      structural.push({ label: raw.trim(), line: i });
+    }
   });
   return { articles, structural, excluded, lines };
 }
@@ -37115,6 +37126,8 @@ function normNum(n) {
 }
 function sliceUnit(index, unit) {
   const spec = plainDashes(unit).trim();
+  const point = POINT.exec(spec);
+  if (point) return slicePoint(index, spec, point);
   const artMatch = /^(?:ст\.?|стаття|st)?\s*(\d+(?:-\d+)?)$/i.exec(spec);
   let starts = [];
   let label = spec;
@@ -37156,13 +37169,7 @@ function sliceUnit(index, unit) {
     }
     return { found: false, unit: spec, occurrences: [], ambiguous: false };
   }
-  const needle = normHeading(spec);
-  const byHeading = (wanted) => index.structural.filter((s) => wanted.includes(normHeading(s.label)));
-  let pool = byHeading([needle]);
-  if (pool.length === 0) pool = byHeading(headingVariants(needle));
-  if (pool.length === 0) {
-    pool = index.structural.filter((s) => normHeading(s.label).startsWith(needle));
-  }
+  const pool = findHeadings(index, spec);
   starts = pool.map((s) => s.line);
   if (pool[0]) label = pool[0].label;
   if (starts.length === 0) {
@@ -37176,32 +37183,133 @@ function sliceUnit(index, unit) {
     ambiguityReason: starts.length > 1 ? "repeated" : void 0
   };
 }
+function findHeadings(index, spec) {
+  const needle = normHeading(spec);
+  const byHeading = (wanted) => index.structural.filter((s) => wanted.includes(normHeading(s.label)));
+  let pool = byHeading([needle]);
+  if (pool.length === 0) pool = byHeading(headingVariants(needle));
+  if (pool.length === 0) {
+    pool = index.structural.filter((s) => normHeading(s.label).startsWith(needle));
+  }
+  if (pool.length === 0 && FINAL_WORDS.test(needle)) {
+    pool = index.structural.filter((s) => FINAL_PROVISIONS.test(plainDashes(s.label)));
+  }
+  return pool;
+}
+function unitEnd(index, start) {
+  const own2 = levelOf(index.lines[start]) ?? ARTICLE_LEVEL;
+  for (let j = start + 1; j < index.lines.length; j++) {
+    if (SIGNATURE.test(plainDashes(index.lines[j]).trim())) return j;
+    const lvl = levelOf(index.lines[j]);
+    if (lvl !== void 0 && lvl <= own2) return j;
+  }
+  return index.lines.length;
+}
+function slicePoint(index, spec, point) {
+  const num = point[1];
+  const label = `\u043F. ${num}`;
+  const parentSpec = spec.replace(point[0], " ").replace(/розділу/iu, " ").replace(/\s+/g, " ").trim();
+  let from = 0;
+  let to = index.lines.length;
+  let parent = "";
+  if (parentSpec) {
+    const pool = findHeadings(index, parentSpec);
+    if (pool.length === 0) return { found: false, unit: spec, occurrences: [], ambiguous: false };
+    if (pool.length > 1) {
+      return {
+        found: true,
+        unit: spec,
+        ambiguous: true,
+        ambiguityReason: "repeated",
+        occurrences: pool.map((h) => ({
+          heading: h.label,
+          text: "",
+          markers: [],
+          charCount: 0,
+          context: ""
+        }))
+      };
+    }
+    from = pool[0].line + 1;
+    to = unitEnd(index, pool[0].line);
+    parent = pool[0].label;
+  } else if (index.articles.size > 0) {
+    return { found: false, unit: spec, occurrences: [], ambiguous: false };
+  }
+  const wanted = [num, num.replace(/-/g, "")];
+  const starts = [];
+  for (let j = from; j < to; j++) {
+    const m = POINT_LINE.exec(plainDashes(index.lines[j]));
+    if (m && wanted.includes(m[1])) starts.push({ line: j, printed: m[1] });
+  }
+  if (starts.length > 0) {
+    const heading = parent ? `${parent}, ${label}` : label;
+    const occurrences = starts.map(({ line }) => {
+      let end = to;
+      for (let k = line + 1; k < to; k++) {
+        const l = plainDashes(index.lines[k]);
+        if (POINT_LINE.test(l) || levelOf(l) !== void 0 || SIGNATURE.test(l.trim())) {
+          end = k;
+          break;
+        }
+      }
+      const { raw: _raw, ...occ } = sliceRange(index, line, end, starts.length);
+      return { ...occ, heading, context: parent };
+    });
+    const flattened = starts.some((s) => s.printed !== num);
+    return {
+      found: true,
+      unit: heading,
+      occurrences,
+      ambiguous: starts.length > 1 || flattened,
+      ambiguityReason: starts.length > 1 ? "collision" : flattened ? "flattened" : void 0
+    };
+  }
+  const scope = index.lines.slice(from, to).join("\n");
+  const repealed = new RegExp(
+    `\\{\\s*\u041F\u0443\u043D\u043A\u0442\\s+${num.replace(/-/g, "-?")}\\s[^}]*?\u0432\u0438\u043A\u043B\u044E\u0447\u0435\u043D\u043E[^}]*\\}`,
+    "iu"
+  ).exec(scope);
+  if (repealed) {
+    return {
+      found: true,
+      unit: parent ? `${parent}, ${label}` : label,
+      ambiguous: false,
+      occurrences: [
+        {
+          heading: parent ? `${parent}, ${label}` : label,
+          text: "",
+          markers: [repealed[0]],
+          excluded: { marker: repealed[0], basis: basisOf(repealed[0]) },
+          charCount: 0,
+          context: parent
+        }
+      ]
+    };
+  }
+  return { found: false, unit: spec, occurrences: [], ambiguous: false };
+}
 function basisOf(marker) {
   const m = EXCL_BASIS.exec(marker);
   return m ? m[1].trim() : "\u0440\u0435\u043A\u0432\u0456\u0437\u0438\u0442\u0438 \u043D\u0435 \u0440\u043E\u0437\u043F\u0456\u0437\u043D\u0430\u043D\u043E";
 }
 function extractAt(index, start, articleNum, sharing = 1) {
-  const { lines } = index;
-  const own2 = levelOf(lines[start]) ?? ARTICLE_LEVEL;
-  let end = lines.length;
-  for (let j = start + 1; j < lines.length; j++) {
-    const lvl = levelOf(lines[j]);
-    if (lvl !== void 0 && lvl <= own2) {
-      end = j;
-      break;
-    }
+  const occ = sliceRange(index, start, unitEnd(index, start), sharing);
+  const exclMatch = EXCLUDED.exec(occ.raw);
+  if (exclMatch && articleNum !== void 0 && normNum(exclMatch[1]) === normNum(articleNum)) {
+    occ.excluded = { marker: exclMatch[0], basis: basisOf(exclMatch[0]) };
   }
+  const { raw: _raw, ...rest } = occ;
+  return rest;
+}
+function sliceRange(index, start, end, sharing = 1) {
+  const { lines } = index;
   const rawText = lines.slice(start, end).join("\n").trim();
   const split = splitMarkers(rawText);
   const budget = Math.floor(MAX_UNIT_CHARS / sharing);
   const truncated = split.clean.length > budget;
   const clean = truncated ? split.clean.slice(0, budget) : split.clean;
   const markers = split.markers.slice(0, Math.max(5, Math.floor(MAX_MARKERS / sharing)));
-  const exclMatch = EXCLUDED.exec(rawText);
-  let excluded;
-  if (exclMatch && articleNum !== void 0 && normNum(exclMatch[1]) === normNum(articleNum)) {
-    excluded = { marker: exclMatch[0], basis: basisOf(exclMatch[0]) };
-  }
   let context = "";
   for (let j = index.structural.length - 1; j >= 0; j--) {
     if (index.structural[j].line < start) {
@@ -37213,9 +37321,9 @@ function extractAt(index, start, articleNum, sharing = 1) {
     heading: lines[start].trim(),
     text: clean,
     markers,
-    excluded,
     charCount: rawText.length,
     context,
+    raw: rawText,
     ...truncated ? { truncated } : {}
   };
 }
@@ -37223,6 +37331,17 @@ function listUnits(index, filter) {
   const f = filter?.trim().toLowerCase();
   const keep = (label) => !f || label.toLowerCase().includes(f);
   const out = index.structural.map((s) => s.label).filter(keep);
+  for (const s of index.structural) {
+    if (!FINAL_PROVISIONS.test(plainDashes(s.label))) continue;
+    const end = unitEnd(index, s.line);
+    for (let j = s.line + 1; j < end; j++) {
+      const l = plainDashes(index.lines[j]).trim();
+      const point = POINT_LINE.exec(l);
+      const gone = /^\{\s*Пункт\s+(\d+(?:-\d+)?)\s[^}]*виключено/iu.exec(l);
+      const label = point ? `${s.label}, \u043F. ${point[1]}: ${l.slice(point[0].length, point[0].length + 110)}\u2026` : gone ? `${s.label}, \u043F. ${gone[1]}: \u0412\u0418\u041A\u041B\u042E\u0427\u0415\u041D\u041E` : void 0;
+      if (label && keep(label)) out.push(label);
+    }
+  }
   for (const lines of index.articles.values()) {
     for (const line of lines) {
       const label = index.lines[line].trim();
@@ -37420,7 +37539,22 @@ async function position(id) {
   if (!/^\d+$/.test(id)) {
     throw new SourceError(`\u041B\u041F\u0414 id \u043C\u0430\u0454 \u0431\u0443\u0442\u0438 \u0447\u0438\u0441\u043B\u043E\u043C, \u043E\u0442\u0440\u0438\u043C\u0430\u043D\u043E \xAB${id}\xBB.`, "input");
   }
-  return call(`/legal-position/${id}`);
+  const raw = await call(`/legal-position/${id}`);
+  const docs = Array.isArray(raw?.documents) ? raw.documents : [];
+  return {
+    title: stripTags(raw?.title),
+    text: htmlToText(String(raw?.text ?? "")),
+    valid: raw?.status !== false,
+    mark: raw?.mark ?? null,
+    decisions: docs.map((d) => ({
+      title: stripTags(d?.title),
+      case_number: String(d?.caseNumber ?? ""),
+      date: String(d?.law_date ?? ""),
+      edrsr_id: d?.doc_id ? String(d.doc_id) : null,
+      edrsr_url: d?.doc_id ? `https://reyestr.court.gov.ua/Review/${d.doc_id}` : null
+    })),
+    linked_positions: (Array.isArray(raw?.linkedLegalPositions) ? raw.linkedLegalPositions : []).map((l) => Number(l?.id)).filter(Number.isFinite)
+  };
 }
 async function searchDigests(query) {
   const payload = await call("/digest/search", { query });
@@ -37583,6 +37717,11 @@ function resetBudget() {
 function expireIdleBudget() {
   if (lastDocAt && Date.now() - lastDocAt > IDLE_RESET_MS) resetBudget();
 }
+function trimChrome(text) {
+  const start = text.indexOf("\u041A\u0430\u0442\u0435\u0433\u043E\u0440\u0456\u044F \u0441\u043F\u0440\u0430\u0432\u0438 \u2116");
+  const end = text.indexOf("\u0412\u0432\u0435\u0434\u0456\u0442\u044C, \u0431\u0443\u0434\u044C \u043B\u0430\u0441\u043A\u0430, \u043B\u043E\u0433\u0456\u043D \u0442\u0430 \u043F\u0430\u0440\u043E\u043B\u044C");
+  return text.slice(start >= 0 ? start : 0, end > start ? end : text.length).trim();
+}
 var OPERATIVE = /^\s*(ПОСТАНОВИВ|ПОСТАНОВИЛА|УХВАЛИВ|УХВАЛИЛА|ВИРІШИВ|ВИРІШИЛА|ЗАСУДИВ|ЗАСУДИЛА)\s*:?\s*$/m;
 var CHUNK = 2e4;
 var MAX_HITS = 25;
@@ -37618,7 +37757,7 @@ async function document(id, mode = "head", needle) {
         "unavailable"
       );
     }
-    body = htmlToText(res.body);
+    body = trimChrome(htmlToText(res.body));
     transit.set(id, body);
     lastDocAt = Date.now();
   }
@@ -37851,7 +37990,7 @@ server.registerTool(
         found: false,
         nreg: meta3.nreg,
         unit,
-        message: `\u041E\u0434\u0438\u043D\u0438\u0446\u044E \xAB${unit}\xBB \u0432 \u0430\u043A\u0442\u0456 ${meta3.nreg} \u043D\u0435 \u0437\u043D\u0430\u0439\u0434\u0435\u043D\u043E. \u0426\u0435 \u043E\u0437\u043D\u0430\u0447\u0430\u0454 \xAB\u044F \u043D\u0435 \u0437\u043D\u0430\u0439\u0448\u043E\u0432 \u0437\u0430 \u0446\u0456\u0454\u044E \u0430\u0434\u0440\u0435\u0441\u043E\u044E\xBB, \u0430 \u043D\u0435 \xAB\u0442\u0430\u043A\u043E\u0457 \u043D\u043E\u0440\u043C\u0438 \u043D\u0435 \u0456\u0441\u043D\u0443\u0454\xBB. \u0421\u0442\u0430\u0432\u043A\u0438, \u043F\u0435\u0440\u0435\u0445\u0456\u0434\u043D\u0456 \u0439 \u043F\u0440\u0438\u043A\u0456\u043D\u0446\u0435\u0432\u0456 \u043F\u043E\u043B\u043E\u0436\u0435\u043D\u043D\u044F \u0447\u0430\u0441\u0442\u043E \u0436\u0438\u0432\u0443\u0442\u044C \u0443 \u043F\u0443\u043D\u043A\u0442\u0430\u0445 \u041F\u0406\u0414\u0420\u041E\u0417\u0414\u0406\u041B\u0406\u0412, \u0430 \u043D\u0435 \u0432 \u0441\u0442\u0430\u0442\u0442\u044F\u0445. \u0421\u043A\u043E\u0440\u0438\u0441\u0442\u0430\u0439\u0441\u044F rada_list_units, \u0449\u043E\u0431 \u043F\u043E\u0431\u0430\u0447\u0438\u0442\u0438 \u0437\u043C\u0456\u0441\u0442 \u0430\u043A\u0442\u0430.`,
+        message: `\u041E\u0434\u0438\u043D\u0438\u0446\u044E \xAB${unit}\xBB \u0432 \u0430\u043A\u0442\u0456 ${meta3.nreg} \u043D\u0435 \u0437\u043D\u0430\u0439\u0434\u0435\u043D\u043E. \u0426\u0435 \u043E\u0437\u043D\u0430\u0447\u0430\u0454 \xAB\u044F \u043D\u0435 \u0437\u043D\u0430\u0439\u0448\u043E\u0432 \u0437\u0430 \u0446\u0456\u0454\u044E \u0430\u0434\u0440\u0435\u0441\u043E\u044E\xBB, \u0430 \u043D\u0435 \xAB\u0442\u0430\u043A\u043E\u0457 \u043D\u043E\u0440\u043C\u0438 \u043D\u0435 \u0456\u0441\u043D\u0443\u0454\xBB. \u041F\u0443\u043D\u043A\u0442\u0438 \u0430\u0434\u0440\u0435\u0441\u0443\u0439 \u0440\u0430\u0437\u043E\u043C \u0456\u0437 \u0440\u043E\u0437\u0434\u0456\u043B\u043E\u043C: \xAB\u041F\u0440\u0438\u043A\u0456\u043D\u0446\u0435\u0432\u0456 \u0442\u0430 \u043F\u0435\u0440\u0435\u0445\u0456\u0434\u043D\u0456 \u043F\u043E\u043B\u043E\u0436\u0435\u043D\u043D\u044F \u043F. 19\xBB, \xAB\u041F\u0456\u0434\u0440\u043E\u0437\u0434\u0456\u043B 10 \u043F. 2\xBB. \u0421\u043A\u043E\u0440\u0438\u0441\u0442\u0430\u0439\u0441\u044F rada_list_units, \u0449\u043E\u0431 \u043F\u043E\u0431\u0430\u0447\u0438\u0442\u0438 \u0437\u043C\u0456\u0441\u0442 \u0430\u043A\u0442\u0430.`,
         articles_indexed: index.articles.size,
         source_url: text.sourceUrl,
         retrieved_at: text.retrievedAt
@@ -37906,6 +38045,8 @@ server.registerTool(
     const text = t.text;
     const index = buildIndex(text.body);
     const all = listUnits(index, filter);
+    const unstructured = index.articles.size === 0 && index.structural.length === 0;
+    const full = unstructured ? splitMarkers(text.body.replace(/\r\n?/g, "\n")) : void 0;
     return {
       nreg: t.meta.nreg,
       as_of: t.asOf,
@@ -37917,6 +38058,11 @@ server.registerTool(
       matches: all.length,
       headings: all.slice(0, 400),
       truncated: all.length > 400,
+      ...full ? {
+        full_text: full.clean.slice(0, MAX_UNIT_CHARS),
+        full_text_truncated: full.clean.length > MAX_UNIT_CHARS,
+        note: "\u0412 \u0430\u043A\u0442\u0456 \u043D\u0435\u043C\u0430\u0454 \u0441\u0442\u0430\u0442\u0435\u0439 \u0447\u0438 \u0440\u043E\u0437\u0434\u0456\u043B\u0456\u0432 \u2014 \u043B\u0438\u0448\u0435 \u043F\u0440\u043E\u043D\u0443\u043C\u0435\u0440\u043E\u0432\u0430\u043D\u0456 \u043F\u0443\u043D\u043A\u0442\u0438, \u0442\u043E\u0436 \u0442\u0435\u043A\u0441\u0442 \u043D\u0430\u0432\u0435\u0434\u0435\u043D\u043E \u043F\u043E\u0432\u043D\u0456\u0441\u0442\u044E. \u041E\u043A\u0440\u0435\u043C\u0438\u0439 \u043F\u0443\u043D\u043A\u0442: rada_unit \u0437 unit \xAB\u043F. N\xBB."
+      } : {},
       source_url: text.sourceUrl,
       retrieved_at: text.retrievedAt,
       from_cache: text.fromCache
@@ -38036,31 +38182,6 @@ server.registerTool(
     anonymisation: ANONYMISATION_NOTE,
     retrieved_at: now()
   }))
-);
-server.registerTool(
-  "case_status_instructions",
-  {
-    title: "\u042F\u043A \u043F\u0435\u0440\u0435\u0432\u0456\u0440\u0438\u0442\u0438 \u043F\u0440\u043E\u0446\u0435\u0441\u0443\u0430\u043B\u044C\u043D\u0438\u0439 \u0441\u0442\u0430\u043D \u0441\u043F\u0440\u0430\u0432\u0438 (\u043A\u0440\u043E\u043A \u0434\u043B\u044F \u043B\u044E\u0434\u0438\u043D\u0438)",
-    description: "\u041F\u0440\u043E\u0446\u0435\u0441\u0443\u0430\u043B\u044C\u043D\u0438\u0439 \u0441\u0442\u0430\u043D \u0441\u043F\u0440\u0430\u0432\u0438 (\u0447\u0438 \u043D\u0430\u0431\u0440\u0430\u043B\u043E \u0440\u0456\u0448\u0435\u043D\u043D\u044F \u0441\u0438\u043B\u0438, \u043A\u043E\u043B\u0438 \u0437\u0430\u0441\u0456\u0434\u0430\u043D\u043D\u044F) \u0454 \u043B\u0438\u0448\u0435 \u043D\u0430 court.gov.ua/fair, \u0456 \u0446\u044F \u0441\u0442\u043E\u0440\u0456\u043D\u043A\u0430 \u0437\u0430\u043A\u0440\u0438\u0442\u0430 reCAPTCHA. \u0410\u0432\u0442\u043E\u043C\u0430\u0442\u0438\u0447\u043D\u043E \u0457\u0457 \u043D\u0435 \u043E\u0431\u0445\u043E\u0434\u0438\u043C\u043E. \u0426\u0435\u0439 \u0456\u043D\u0441\u0442\u0440\u0443\u043C\u0435\u043D\u0442 \u0432\u0456\u0434\u0434\u0430\u0454 \u043F\u043E\u043A\u0440\u043E\u043A\u043E\u0432\u0443 \u0456\u043D\u0441\u0442\u0440\u0443\u043A\u0446\u0456\u044E \u0434\u043B\u044F \u043A\u043B\u0456\u0454\u043D\u0442\u0430 \u0430\u0431\u043E \u0430\u0434\u0432\u043E\u043A\u0430\u0442\u0430, \u0449\u043E\u0431 \u0437\u0440\u043E\u0431\u0438\u0442\u0438 \u043F\u0435\u0440\u0435\u0432\u0456\u0440\u043A\u0443 \u0432\u0440\u0443\u0447\u043D\u0443.",
-    inputSchema: {
-      case_number: external_exports.string().max(40).optional().describe("\u0404\u0423\u041D, \u044F\u043A\u0449\u043E \u0432\u0456\u0434\u043E\u043C\u0438\u0439.")
-    },
-    annotations: { readOnlyHint: true, openWorldHint: false }
-  },
-  async ({ case_number }) => ok({
-    why: "\u041F\u043E\u0448\u0443\u043A \u043D\u0430 court.gov.ua/fair \u0437\u0430\u0445\u0438\u0449\u0435\u043D\u0438\u0439 reCAPTCHA v2. \u041F\u0435\u0440\u0435\u0432\u0456\u0440\u0435\u043D\u043E 2026-09-20: \u043A\u043D\u043E\u043F\u043A\u0430 \u043F\u043E\u0448\u0443\u043A\u0443 \u043D\u0435 \u043D\u0430\u0434\u0441\u0438\u043B\u0430\u0454 \u0436\u043E\u0434\u043D\u043E\u0433\u043E \u0437\u0430\u043F\u0438\u0442\u0443, \u043F\u043E\u043A\u0438 \u043A\u0430\u043F\u0447\u0443 \u043D\u0435 \u043F\u0440\u043E\u0439\u0434\u0435\u043D\u043E. \u041E\u0431\u0445\u0456\u0434 \u043A\u0430\u043F\u0447\u0456 \u043D\u0435 \u0432\u0438\u043A\u043E\u043D\u0443\u0454\u0442\u044C\u0441\u044F \u2014 \u0446\u0435 \u0440\u043E\u0431\u0438\u0442\u044C \u043B\u044E\u0434\u0438\u043D\u0430.",
-    steps: [
-      "\u0412\u0456\u0434\u043A\u0440\u0438\u0439 https://court.gov.ua/fair/ \u0443 \u0437\u0432\u0438\u0447\u0430\u0439\u043D\u043E\u043C\u0443 \u0431\u0440\u0430\u0443\u0437\u0435\u0440\u0456.",
-      `\u0423 \u043F\u043E\u043B\u0435 \xAB\u041D\u043E\u043C\u0435\u0440 \u0441\u043F\u0440\u0430\u0432\u0438\xBB \u0432\u0432\u0435\u0434\u0438 ${case_number ?? "\u0404\u0423\u041D \u0441\u043F\u0440\u0430\u0432\u0438"}.`,
-      "\u041F\u0440\u043E\u0439\u0434\u0438 reCAPTCHA \u0456 \u043D\u0430\u0442\u0438\u0441\u043D\u0438 \u043F\u043E\u0448\u0443\u043A.",
-      "\u0421\u043A\u043E\u043F\u0456\u044E\u0439 \u0440\u0435\u0437\u0443\u043B\u044C\u0442\u0430\u0442 (\u0441\u0442\u0430\u0434\u0456\u044F, \u043E\u0441\u0442\u0430\u043D\u043D\u044F \u043F\u043E\u0434\u0456\u044F, \u0434\u0430\u0442\u0430 \u0437\u0430\u0441\u0456\u0434\u0430\u043D\u043D\u044F) \u0456 \u0432\u0441\u0442\u0430\u0432 \u0439\u043E\u0433\u043E \u0441\u044E\u0434\u0438 \u2014 \u044F \u0432\u043D\u0435\u0441\u0443 \u0446\u0435 \u0432 CASE.md \u0456 \u043F\u0435\u0440\u0435\u0440\u0430\u0445\u0443\u044E \u0441\u0442\u0440\u043E\u043A\u0438."
-    ],
-    alternatives: [
-      "\u0415\u043B\u0435\u043A\u0442\u0440\u043E\u043D\u043D\u0438\u0439 \u0441\u0443\u0434 (cabinet.court.gov.ua) \u2014 \u043E\u0444\u0456\u0446\u0456\u0439\u043D\u0456 \u043F\u043E\u0432\u0456\u0434\u043E\u043C\u043B\u0435\u043D\u043D\u044F \u0443 \u0441\u043F\u0440\u0430\u0432\u0456, \u044F\u043A\u0449\u043E \u0430\u0434\u0432\u043E\u043A\u0430\u0442 \u043C\u0430\u0454 \u0442\u0430\u043C \u043A\u0430\u0431\u0456\u043D\u0435\u0442.",
-      "edrsr_search \u0437\u0430 \u043D\u043E\u043C\u0435\u0440\u043E\u043C \u0441\u043F\u0440\u0430\u0432\u0438 \u043F\u043E\u043A\u0430\u0436\u0435 \u043D\u043E\u0432\u0456 \u041E\u041F\u0423\u0411\u041B\u0406\u041A\u041E\u0412\u0410\u041D\u0406 \u0440\u0456\u0448\u0435\u043D\u043D\u044F, \u0430\u043B\u0435 \u043D\u0435 \u043F\u0440\u043E\u0446\u0435\u0441\u0443\u0430\u043B\u044C\u043D\u0438\u0439 \u0441\u0442\u0430\u043D \u0456 \u043D\u0435 \u0434\u0430\u0442\u0438 \u0437\u0430\u0441\u0456\u0434\u0430\u043D\u044C."
-    ],
-    retrieved_at: now()
-  })
 );
 var transport = new StdioServerTransport();
 await server.connect(transport);

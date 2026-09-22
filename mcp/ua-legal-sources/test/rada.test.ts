@@ -563,3 +563,76 @@ test("resolver cache: only a non-empty list of strings is trusted", () => {
     assert.equal(parseNregList(body), undefined, body);
   }
 });
+
+// ───────────────────────── final provisions (ЦК, verbatim, 2026-09-21)
+
+const finalIx = () => buildIndex(read("cc-final-provisions.txt"));
+
+test("final provisions: a point is addressable in the ways users write it", () => {
+  for (const unit of [
+    "Прикінцеві та перехідні положення п. 12",
+    "п. 12 Прикінцевих та перехідних положень",
+    "пункт 12 розділу Прикінцеві та перехідні положення",
+  ]) {
+    const r = sliceUnit(finalIx(), unit);
+    assert.equal(r.found, true, unit);
+    assert.match(r.occurrences[0].text, /^12\. Під час дії карантину/, unit);
+    assert.doesNotMatch(r.occurrences[0].text, /^18\./m, unit);
+  }
+});
+
+test("final provisions: a repealed point is reported as repealed, with its law", () => {
+  // ☠️ The martial-law limitation rule. «Not found» here would send the model to
+  // its memory, which still believes the rule is in force.
+  const r = sliceUnit(finalIx(), "Прикінцеві та перехідні положення п. 19");
+  assert.equal(r.found, true);
+  assert.equal(r.occurrences[0].excluded?.basis, "Закону № 4434-IX від 14.05.2025");
+});
+
+test("final provisions: flattened superscript points are all reported", () => {
+  const r = sliceUnit(finalIx(), "Прикінцеві та перехідні положення п. 22-1");
+  assert.equal(r.occurrences.length, 2);
+  assert.equal(r.ambiguous, true);
+  assert.equal(r.ambiguityReason, "collision");
+});
+
+test("final provisions: the signature block never rides into a norm", () => {
+  const last = sliceUnit(finalIx(), "Прикінцеві та перехідні положення п. 36");
+  assert.equal(last.found, true);
+  assert.doesNotMatch(last.occurrences[0].text, /КУЧМА|Президент/);
+  const section = sliceUnit(finalIx(), "Прикінцеві та перехідні положення");
+  assert.doesNotMatch(section.occurrences[0].text, /КУЧМА/);
+});
+
+test("final provisions: the last article no longer swallows them", () => {
+  const r = sliceUnit(finalIx(), "1308");
+  assert.doesNotMatch(r.occurrences[0].text, /ПРИКІНЦЕВІ/);
+});
+
+test("final provisions: points are listed with their opening words", () => {
+  const all = listUnits(finalIx(), "карантину");
+  assert.ok(all.some((l) => l.startsWith("ПРИКІНЦЕВІ ТА ПЕРЕХІДНІ ПОЛОЖЕННЯ, п. 12:")));
+  assert.deepEqual(listUnits(finalIx(), "ВИКЛЮЧЕНО"), [
+    "ПРИКІНЦЕВІ ТА ПЕРЕХІДНІ ПОЛОЖЕННЯ, п. 19: ВИКЛЮЧЕНО",
+  ]);
+});
+
+test("a short amending law: its numbered points are addressable", () => {
+  const law = [
+    "ЗАКОН УКРАЇНИ",
+    "Верховна Рада України постановляє:",
+    "1. Пункт 19 розділу \"Прикінцеві та перехідні положення\" Цивільного кодексу України виключити.",
+    "2. Цей Закон набирає чинності через три місяці з дня, наступного за днем його опублікування.",
+    "Президент України",
+    "В. ЗЕЛЕНСЬКИЙ",
+  ].join("\n");
+  const r = sliceUnit(buildIndex(law), "п. 2");
+  assert.equal(r.occurrences[0].text, "2. Цей Закон набирає чинності через три місяці з дня, наступного за днем його опублікування.");
+  // A sentence that mentions final provisions is not taken for a heading.
+  assert.equal(buildIndex(law).structural.length, 0);
+});
+
+test("a bare point in a code is refused, not matched against every article part", () => {
+  const r = sliceUnit(buildIndex(read("cc-excerpt.txt")), "п. 2");
+  assert.equal(r.found, false);
+});

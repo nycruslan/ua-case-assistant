@@ -18,6 +18,7 @@ import {
   parseFound,
   parseRows,
   stripAngles,
+  trimChrome,
 } from "../src/edrsr.ts";
 import { htmlToText } from "../src/html.ts";
 
@@ -172,4 +173,23 @@ test("court dates: a reversed range is refused, not reported as zero decisions",
   assert.throws(() => courtDateRange("01.01.2025", "31.12.2024"), { kind: "input" });
   // Compared as dates, not as strings: 02.01 is later than 31.12 of the year before.
   assert.doesNotThrow(() => courtDateRange("31.12.2024", "02.01.2025"));
+});
+
+test("a decision page keeps the decision and drops the site around it", () => {
+  const page = [
+    "Єдиний державний реєстр судових рішень",
+    "Головна", "Законодавство",
+    "Категорія справи № 183/7850/22 : Цивільні справи",
+    "ПОСТАНОВИВ:",
+    "Касаційну скаргу задовольнити частково.",
+    "Головуючий В. І. Крат",
+    "Введіть, будь ласка, логін та пароль",
+    "Введіть cуму цифр, зображених на малюнку:",
+    "var pageTracker = _gat._getTracker(\"UA-33842633-1\");",
+  ].join("\n");
+  const text = trimChrome(page);
+  assert.match(text, /^Категорія справи №/);
+  assert.match(text, /Головуючий В\. І\. Крат$/);
+  // No marker, no guessing: the text is kept whole.
+  assert.equal(trimChrome("просто текст"), "просто текст");
 });

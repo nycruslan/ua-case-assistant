@@ -36,6 +36,7 @@ import {
   redactionAsOf,
   resolve,
   sliceUnit,
+  splitMarkers,
 } from "./rada.ts";
 import * as lpd from "./lpd.ts";
 import * as edrsr from "./edrsr.ts";
@@ -333,9 +334,9 @@ server.registerTool(
           message:
             `Одиницю «${unit}» в акті ${meta.nreg} не знайдено. Це означає «я не ` +
             `знайшов за цією адресою», а не «такої норми не існує». ` +
-            `Ставки, перехідні й прикінцеві положення часто живуть у пунктах ` +
-            `ПІДРОЗДІЛІВ, а не в статтях. Скористайся rada_list_units, щоб ` +
-            `побачити зміст акта.`,
+            `Пункти адресуй разом із розділом: «Прикінцеві та перехідні ` +
+            `положення п. 19», «Підрозділ 10 п. 2». Скористайся rada_list_units, ` +
+            `щоб побачити зміст акта.`,
           articles_indexed: index.articles.size,
           source_url: text.sourceUrl,
           retrieved_at: text.retrievedAt,
@@ -426,6 +427,10 @@ server.registerTool(
       const text = t.text;
       const index = buildIndex(text.body);
       const all = listUnits(index, filter);
+      // A short amending law has no articles or headings to list — only numbered
+      // points. Listing nothing would make it unreadable, so give the text.
+      const unstructured = index.articles.size === 0 && index.structural.length === 0;
+      const full = unstructured ? splitMarkers(text.body.replace(/\r\n?/g, "\n")) : undefined;
       return {
         nreg: t.meta.nreg,
         as_of: t.asOf,
@@ -437,6 +442,15 @@ server.registerTool(
         matches: all.length,
         headings: all.slice(0, 400),
         truncated: all.length > 400,
+        ...(full
+          ? {
+              full_text: full.clean.slice(0, MAX_UNIT_CHARS),
+              full_text_truncated: full.clean.length > MAX_UNIT_CHARS,
+              note:
+                "В акті немає статей чи розділів — лише пронумеровані пункти, тож " +
+                "текст наведено повністю. Окремий пункт: rada_unit з unit «п. N».",
+            }
+          : {}),
         source_url: text.sourceUrl,
         retrieved_at: text.retrievedAt,
         from_cache: text.fromCache,
@@ -610,45 +624,6 @@ server.registerTool(
       anonymisation: edrsr.ANONYMISATION_NOTE,
       retrieved_at: now(),
     })),
-);
-
-// ───────────────────────────────────────────────────────── case status (human)
-
-server.registerTool(
-  "case_status_instructions",
-  {
-    title: "Як перевірити процесуальний стан справи (крок для людини)",
-    description:
-      "Процесуальний стан справи (чи набрало рішення сили, коли засідання) " +
-      "є лише на court.gov.ua/fair, і ця сторінка закрита reCAPTCHA. " +
-      "Автоматично її не обходимо. Цей інструмент віддає покрокову " +
-      "інструкцію для клієнта або адвоката, щоб зробити перевірку вручну.",
-    inputSchema: {
-      case_number: z.string().max(40).optional().describe("ЄУН, якщо відомий."),
-    },
-    annotations: { readOnlyHint: true, openWorldHint: false },
-  },
-  async ({ case_number }) =>
-    ok({
-      why:
-        "Пошук на court.gov.ua/fair захищений reCAPTCHA v2. Перевірено " +
-        "2026-09-20: кнопка пошуку не надсилає жодного запиту, поки капчу не " +
-        "пройдено. Обхід капчі не виконується — це робить людина.",
-      steps: [
-        "Відкрий https://court.gov.ua/fair/ у звичайному браузері.",
-        `У поле «Номер справи» введи ${case_number ?? "ЄУН справи"}.`,
-        "Пройди reCAPTCHA і натисни пошук.",
-        "Скопіюй результат (стадія, остання подія, дата засідання) " +
-          "і встав його сюди — я внесу це в CASE.md і перерахую строки.",
-      ],
-      alternatives: [
-        "Електронний суд (cabinet.court.gov.ua) — офіційні повідомлення у справі, " +
-          "якщо адвокат має там кабінет.",
-        "edrsr_search за номером справи покаже нові ОПУБЛІКОВАНІ рішення, " +
-          "але не процесуальний стан і не дати засідань.",
-      ],
-      retrieved_at: now(),
-    }),
 );
 
 const transport = new StdioServerTransport();

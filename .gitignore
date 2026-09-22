@@ -3,12 +3,22 @@ case/
 cases/
 *.pdf
 *.docx
+*.doc
+*.rtf
+*.odt
+*.xlsx
+*.xls
+*.eml
+*.jpg
+*.jpeg
+*.png
+*.heic
+*.m4a
+*.mp3
+*.mp4
 *.ics
 .env
 node_modules/
 dist/
 *.mcpb
 .DS_Store
-# Python bytecode (compile-checking the .ics script creates it)
-__pycache__/
-*.pyc

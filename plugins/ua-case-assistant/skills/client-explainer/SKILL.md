@@ -7,8 +7,6 @@ description: >
   адвокату", "що взяти на зустріч", "підсумуй справу для мене". It explains the case, documents and next
   steps in plain Ukrainian, prepares the client for hearings and meetings, and routes strategy decisions to
   the advocate.
-metadata:
-  version: "0.1.0"
 ---
 
 # Пояснення для клієнта

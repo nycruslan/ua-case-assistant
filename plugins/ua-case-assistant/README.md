@@ -54,10 +54,20 @@
 | `rada_resolve`, `rada_status`, `rada_unit`, `rada_list_units` | офіційне відкрите API data.rada.gov.ua |
 | `lpd_search`, `lpd_position`, `lpd_digest_search` | база правових позицій ВС |
 | `edrsr_search`, `edrsr_document` | ЄДРСР |
-| `case_status_instructions` | інструкція для людини: `court.gov.ua/fair` під reCAPTCHA |
+
+Стан справи на `court.gov.ua/fair` закритий reCAPTCHA, тому його перевіряє людина — скіл `case-monitor`
+дає інструкцію.
 
 Деталі й пастки, які вони закривають (архівні «двійники» кодексів, надрядкові номери статей, виключені
-статті, майбутні редакції) — у `mcp/ua-legal-sources.mjs` та в README репозиторію.
+статті й пункти, прикінцеві та перехідні положення, майбутні редакції) — у README репозиторію.
+
+## Які документи він читає
+
+PDF (зокрема скани), фото (JPG, PNG, HEIC з iPhone), Word (DOCX, DOC, RTF, ODT), Excel (XLSX), листи
+(EML), скріншоти й експорти месенджерів, ZIP-архіви — вбудованими засобами Claude і системи, нічого
+встановлювати не треба. Аудіо й відео Claude прослухати не може: такі файли позначаються «потрібна
+розшифровка». Word, RTF і фото HEIC конвертуються засобами macOS; на інших системах їх треба зберегти як
+PDF чи JPG.
 
 ## Структура папки справи (створює `setup` / `case-setup`)
 
@@ -76,4 +86,4 @@ CASE.md  INDEX.md  CHRONOLOGY.md  EVIDENCE.md  DEADLINES.md  LOG.md
 - Спільна папка — джерело істини; записи позначаються `[адвокат]` / `[клієнт]`.
 - Порожній результат означає «я не знайшов», а не «цього не існує».
 
-Інструкції для проєкту Cowork — у `PROJECT_INSTRUCTIONS.md`.
+Для Cowork: текст `skills/setup/references/case-folder-CLAUDE.md` вставляється в Project → Instructions.

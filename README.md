@@ -121,7 +121,7 @@ is never de-anonymised or linked across documents.
 
 ```bash
 cd mcp/ua-legal-sources && npm install
-npm test              # 69 unit tests on recorded fixtures, no network
+npm test              # 78 unit tests on recorded fixtures, no network
 npm run check-config  # the repo's dev .mcp.json launches the server
 npm run build         # rebuild the bundle the plugin ships
 npm run check-plugin  # the BUNDLED plugin server, spawned as a client would

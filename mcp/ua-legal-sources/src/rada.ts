@@ -383,6 +383,34 @@ const ARTICLE = /^Стаття\s+(\d+(?:-\d+)?)\s*\.?/;
 const STRUCTURAL = /^(Книга|Розділ|Глава|Підрозділ|Параграф)(?=[\s:.]|$)/iu;
 
 /**
+ * A final-provisions section that is not printed as a «Розділ»: ЦК ends with a
+ * bare «ПРИКІНЦЕВІ ТА ПЕРЕХІДНІ ПОЛОЖЕННЯ», amending laws with
+ * «II. Прикінцеві та перехідні положення».
+ *
+ * ☠️ Without this the most litigated rules were unreachable: martial-law and
+ * quarantine limitation periods (ЦК, п. 12 and the repealed п. 19) live there,
+ * and `rada_unit` answered «not found». Whole line only, so a sentence that
+ * merely mentions «перехідних положень» is never taken for a heading.
+ */
+const FINAL_PROVISIONS =
+  /^(?:[IVXІХ]+\.\s*)?(?:(?:ПРИКІНЦЕВІ|ЗАКЛЮЧНІ)(?:\s+ТА\s+ПЕРЕХІДНІ)?|ПЕРЕХІДНІ)\s+ПОЛОЖЕННЯ\s*$/iu;
+/** How a user names that section: «п. 19 Прикінцевих», «перехідні положення». */
+const FINAL_WORDS = /(прикінцев|перехідн|заключн)/iu;
+
+/** «п. 19», «пункт 19», «п.22-1» inside a unit address. */
+const POINT = /(?:^|\s|,)(?:п\.|пункт|пп\.)\s*(\d+(?:-\d+)?)(?=$|[\s,])/iu;
+/**
+ * The signature block that closes every act («Президент України», «Голова
+ * Верховної Ради України»). ☠️ The last point of ЦК's final provisions otherwise
+ * ends with «Президент України Л.КУЧМА м. Київ 16 січня 2003 року № 435-IV»,
+ * which would ride into a quotation as if it were part of the norm.
+ */
+const SIGNATURE = /^(Президент України|Голова Верховної Ради України|Прем'єр-міністр України)\s*$/u;
+
+/** A numbered point at the start of a line: «19. У період…». */
+const POINT_LINE = /^(\d+(?:-\d+)?)\.\s/;
+
+/**
  * Nesting depth of a heading. A unit runs until the next heading at the SAME OR
  * HIGHER level, so a Глава includes its articles and a Розділ its Глави.
  *
@@ -391,6 +419,9 @@ const STRUCTURAL = /^(Книга|Розділ|Глава|Підрозділ|Па
  * title and nothing else.
  */
 const LEVEL: Record<string, number> = {
+  // Final provisions close the whole act, so nothing but another top-level
+  // section may end them.
+  final: 1,
   книга: 1,
   розділ: 2,
   підрозділ: 3,
@@ -408,7 +439,8 @@ function levelOf(line: string): number | undefined {
   const l = plainDashes(line);
   if (ARTICLE.test(l)) return ARTICLE_LEVEL;
   const m = STRUCTURAL.exec(l);
-  return m ? LEVEL[m[1].toLowerCase()] : undefined;
+  if (m) return LEVEL[m[1].toLowerCase()];
+  return FINAL_PROVISIONS.test(l.trim()) ? LEVEL.final : undefined;
 }
 
 /**
@@ -521,7 +553,9 @@ export function buildIndex(text: string): UnitIndex {
       else articles.set(num, [i]);
       return;
     }
-    if (STRUCTURAL.test(l)) structural.push({ label: raw.trim(), line: i });
+    if (STRUCTURAL.test(l) || FINAL_PROVISIONS.test(l.trim())) {
+      structural.push({ label: raw.trim(), line: i });
+    }
   });
   return { articles, structural, excluded, lines };
 }
@@ -627,6 +661,8 @@ function normNum(n: string): string {
  */
 export function sliceUnit(index: UnitIndex, unit: string): UnitResult {
   const spec = plainDashes(unit).trim();
+  const point = POINT.exec(spec);
+  if (point) return slicePoint(index, spec, point);
   const artMatch = /^(?:ст\.?|стаття|st)?\s*(\d+(?:-\d+)?)$/i.exec(spec);
 
   let starts: number[] = [];
@@ -680,16 +716,7 @@ export function sliceUnit(index: UnitIndex, unit: string): UnitResult {
     return { found: false, unit: spec, occurrences: [], ambiguous: false };
   }
 
-  // ☠️ Exact match first. Plain prefix matching made «Глава 4» also match
-  // «Глава 41», reporting a false ambiguity between unrelated chapters.
-  const needle = normHeading(spec);
-  const byHeading = (wanted: string[]) =>
-    index.structural.filter((s) => wanted.includes(normHeading(s.label)));
-  let pool = byHeading([needle]);
-  if (pool.length === 0) pool = byHeading(headingVariants(needle));
-  if (pool.length === 0) {
-    pool = index.structural.filter((s) => normHeading(s.label).startsWith(needle));
-  }
+  const pool = findHeadings(index, spec);
   starts = pool.map((s) => s.line);
   if (pool[0]) label = pool[0].label;
 
@@ -703,6 +730,139 @@ export function sliceUnit(index: UnitIndex, unit: string): UnitResult {
     ambiguous: starts.length > 1,
     ambiguityReason: starts.length > 1 ? "repeated" : undefined,
   };
+}
+
+/** Structural headings matching a user's address, best match first. */
+function findHeadings(index: UnitIndex, spec: string): { label: string; line: number }[] {
+  // ☠️ Exact match first. Plain prefix matching made «Глава 4» also match
+  // «Глава 41», reporting a false ambiguity between unrelated chapters.
+  const needle = normHeading(spec);
+  const byHeading = (wanted: string[]) =>
+    index.structural.filter((s) => wanted.includes(normHeading(s.label)));
+  let pool = byHeading([needle]);
+  if (pool.length === 0) pool = byHeading(headingVariants(needle));
+  if (pool.length === 0) {
+    pool = index.structural.filter((s) => normHeading(s.label).startsWith(needle));
+  }
+  // «п. 19 Прикінцевих положень» names the section by its subject, in any case
+  // ending, so match the final-provisions heading by that subject.
+  if (pool.length === 0 && FINAL_WORDS.test(needle)) {
+    pool = index.structural.filter((s) => FINAL_PROVISIONS.test(plainDashes(s.label)));
+  }
+  return pool;
+}
+
+/** Where a unit that starts at `start` ends: the next heading at its level or above. */
+function unitEnd(index: UnitIndex, start: number): number {
+  const own = levelOf(index.lines[start]) ?? ARTICLE_LEVEL;
+  for (let j = start + 1; j < index.lines.length; j++) {
+    if (SIGNATURE.test(plainDashes(index.lines[j]).trim())) return j;
+    const lvl = levelOf(index.lines[j]);
+    if (lvl !== undefined && lvl <= own) return j;
+  }
+  return index.lines.length;
+}
+
+/**
+ * One numbered point: «Прикінцеві та перехідні положення п. 19», or «п. 2» of
+ * a short act that has no articles at all (most amending laws).
+ *
+ * A point runs until the next numbered point or heading. A repealed point keeps
+ * only its marker — «{Пункт 19 розділу виключено на підставі Закону № 4434-IX}»
+ * — and that marker is the answer, not «not found».
+ */
+function slicePoint(index: UnitIndex, spec: string, point: RegExpExecArray): UnitResult {
+  const num = point[1];
+  const label = `п. ${num}`;
+  const parentSpec = spec.replace(point[0], " ").replace(/розділу/iu, " ").replace(/\s+/g, " ").trim();
+
+  let from = 0;
+  let to = index.lines.length;
+  let parent = "";
+  if (parentSpec) {
+    const pool = findHeadings(index, parentSpec);
+    if (pool.length === 0) return { found: false, unit: spec, occurrences: [], ambiguous: false };
+    if (pool.length > 1) {
+      // Refuse to guess which of several sections was meant.
+      return {
+        found: true,
+        unit: spec,
+        ambiguous: true,
+        ambiguityReason: "repeated",
+        occurrences: pool.map((h) => ({
+          heading: h.label,
+          text: "",
+          markers: [],
+          charCount: 0,
+          context: "",
+        })),
+      };
+    }
+    from = pool[0].line + 1;
+    to = unitEnd(index, pool[0].line);
+    parent = pool[0].label;
+  } else if (index.articles.size > 0) {
+    // ☠️ A bare «п. 2» in a code would match part 2 of every article — hundreds of
+    // unrelated hits. Without a section it only means something in a short act
+    // that has no articles; in a code, the section must be named.
+    return { found: false, unit: spec, occurrences: [], ambiguous: false };
+  }
+
+  // ☠️ Every match, not the first: superscript points are flattened like
+  // articles, and ЦК prints two different points as «221.».
+  const wanted = [num, num.replace(/-/g, "")];
+  const starts: { line: number; printed: string }[] = [];
+  for (let j = from; j < to; j++) {
+    const m = POINT_LINE.exec(plainDashes(index.lines[j]));
+    if (m && wanted.includes(m[1])) starts.push({ line: j, printed: m[1] });
+  }
+  if (starts.length > 0) {
+    const heading = parent ? `${parent}, ${label}` : label;
+    const occurrences = starts.map(({ line }) => {
+      let end = to;
+      for (let k = line + 1; k < to; k++) {
+        const l = plainDashes(index.lines[k]);
+        if (POINT_LINE.test(l) || levelOf(l) !== undefined || SIGNATURE.test(l.trim())) {
+          end = k;
+          break;
+        }
+      }
+      const { raw: _raw, ...occ } = sliceRange(index, line, end, starts.length);
+      return { ...occ, heading, context: parent };
+    });
+    const flattened = starts.some((s) => s.printed !== num);
+    return {
+      found: true,
+      unit: heading,
+      occurrences,
+      ambiguous: starts.length > 1 || flattened,
+      ambiguityReason: starts.length > 1 ? "collision" : flattened ? "flattened" : undefined,
+    };
+  }
+
+  const scope = index.lines.slice(from, to).join("\n");
+  const repealed = new RegExp(
+    `\\{\\s*Пункт\\s+${num.replace(/-/g, "-?")}\\s[^}]*?виключено[^}]*\\}`,
+    "iu",
+  ).exec(scope);
+  if (repealed) {
+    return {
+      found: true,
+      unit: parent ? `${parent}, ${label}` : label,
+      ambiguous: false,
+      occurrences: [
+        {
+          heading: parent ? `${parent}, ${label}` : label,
+          text: "",
+          markers: [repealed[0]],
+          excluded: { marker: repealed[0], basis: basisOf(repealed[0]) },
+          charCount: 0,
+          context: parent,
+        },
+      ],
+    };
+  }
+  return { found: false, unit: spec, occurrences: [], ambiguous: false };
 }
 
 function basisOf(marker: string): string {
@@ -724,16 +884,28 @@ function extractAt(
   /** How many occurrences share one answer — they split the size budget. */
   sharing = 1,
 ): UnitOccurrence {
-  const { lines } = index;
-  const own = levelOf(lines[start]) ?? ARTICLE_LEVEL;
-  let end = lines.length;
-  for (let j = start + 1; j < lines.length; j++) {
-    const lvl = levelOf(lines[j]);
-    if (lvl !== undefined && lvl <= own) {
-      end = j;
-      break;
-    }
+  const occ = sliceRange(index, start, unitEnd(index, start), sharing);
+  // Only a marker that names THIS article excludes it. See EXCLUDED.
+  const exclMatch = EXCLUDED.exec(occ.raw);
+  if (
+    exclMatch &&
+    articleNum !== undefined &&
+    normNum(exclMatch[1]) === normNum(articleNum)
+  ) {
+    occ.excluded = { marker: exclMatch[0], basis: basisOf(exclMatch[0]) };
   }
+  const { raw: _raw, ...rest } = occ;
+  return rest;
+}
+
+/** Lines [start, end) as a quotable occurrence, cut to this answer's share of the budget. */
+function sliceRange(
+  index: UnitIndex,
+  start: number,
+  end: number,
+  sharing = 1,
+): UnitOccurrence & { raw: string } {
+  const { lines } = index;
   const rawText = lines.slice(start, end).join("\n").trim();
   const split = splitMarkers(rawText);
   // ☠️ The budget is per ANSWER, not per occurrence: three «Розділ I» capped
@@ -742,17 +914,6 @@ function extractAt(
   const truncated = split.clean.length > budget;
   const clean = truncated ? split.clean.slice(0, budget) : split.clean;
   const markers = split.markers.slice(0, Math.max(5, Math.floor(MAX_MARKERS / sharing)));
-
-  // Only a marker that names THIS article excludes it. See EXCLUDED.
-  const exclMatch = EXCLUDED.exec(rawText);
-  let excluded: UnitOccurrence["excluded"];
-  if (
-    exclMatch &&
-    articleNum !== undefined &&
-    normNum(exclMatch[1]) === normNum(articleNum)
-  ) {
-    excluded = { marker: exclMatch[0], basis: basisOf(exclMatch[0]) };
-  }
 
   // Nearest structural heading above this line.
   let context = "";
@@ -767,9 +928,9 @@ function extractAt(
     heading: lines[start].trim(),
     text: clean,
     markers,
-    excluded,
     charCount: rawText.length,
     context,
+    raw: rawText,
     ...(truncated ? { truncated } : {}),
   };
 }
@@ -779,6 +940,24 @@ export function listUnits(index: UnitIndex, filter?: string): string[] {
   const f = filter?.trim().toLowerCase();
   const keep = (label: string) => !f || label.toLowerCase().includes(f);
   const out = index.structural.map((s) => s.label).filter(keep);
+  // Final provisions have no headings inside, only numbered points, and the
+  // whole section is too long to read at once (ЦК: 40 000 characters). List each
+  // point with its opening words, so «позовн» finds the limitation rules.
+  for (const s of index.structural) {
+    if (!FINAL_PROVISIONS.test(plainDashes(s.label))) continue;
+    const end = unitEnd(index, s.line);
+    for (let j = s.line + 1; j < end; j++) {
+      const l = plainDashes(index.lines[j]).trim();
+      const point = POINT_LINE.exec(l);
+      const gone = /^\{\s*Пункт\s+(\d+(?:-\d+)?)\s[^}]*виключено/iu.exec(l);
+      const label = point
+        ? `${s.label}, п. ${point[1]}: ${l.slice(point[0].length, point[0].length + 110)}…`
+        : gone
+          ? `${s.label}, п. ${gone[1]}: ВИКЛЮЧЕНО`
+          : undefined;
+      if (label && keep(label)) out.push(label);
+    }
+  }
   for (const lines of index.articles.values()) {
     for (const line of lines) {
       const label = index.lines[line].trim();

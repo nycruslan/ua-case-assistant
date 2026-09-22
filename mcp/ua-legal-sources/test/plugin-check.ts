@@ -83,22 +83,22 @@ const expected = [
   "lpd_digest_search",
   "edrsr_search",
   "edrsr_document",
-  "case_status_instructions",
 ];
 const names = tools.map((t) => t.name).sort();
 const missing = expected.filter((e) => !names.includes(e));
 if (missing.length) throw new Error(`bundle is missing tools: ${missing.join(", ")}`);
 
-// And a no-network tool call must work through the bundle.
+// And a tool call must round-trip through the bundle. An impossible date is
+// refused before any request, so this needs no network.
 const res = await client.callTool({
-  name: "case_status_instructions",
-  arguments: {},
+  name: "edrsr_search",
+  arguments: { case_number: "522/2588/23", date_from: "31.02.2024" },
 });
 const parsed = JSON.parse(
   (res.content as { type: string; text: string }[])[0].text,
 );
-if (!Array.isArray(parsed.steps) || parsed.steps.length === 0) {
-  throw new Error("case_status_instructions returned no steps");
+if (!res.isError || parsed.kind !== "input") {
+  throw new Error(`expected an input error, got ${JSON.stringify(parsed)}`);
 }
 
 await client.close();

@@ -317,6 +317,24 @@ function expireIdleBudget(): void {
   if (lastDocAt && Date.now() - lastDocAt > IDLE_RESET_MS) resetBudget();
 }
 
+/**
+ * The decision without the site around it.
+ *
+ * ☠️ The page text also carries a banner and menu before the decision and, after
+ * the judges' signatures, a login modal, the anti-bot prompt, a feedback form and
+ * the analytics script. `mode=operative` and `tail` returned all of it as if it
+ * were the end of the ruling. The decision starts at the case metadata
+ * («Категорія справи №») and ends where the login modal begins. If either
+ * marker is missing the text is kept whole rather than guessed at.
+ */
+export function trimChrome(text: string): string {
+  const start = text.indexOf("Категорія справи №");
+  const end = text.indexOf("Введіть, будь ласка, логін та пароль");
+  return text
+    .slice(start >= 0 ? start : 0, end > start ? end : text.length)
+    .trim();
+}
+
 /** Резолютивна частина markers — «чим закінчилось» lives at the very END. */
 const OPERATIVE =
   /^\s*(ПОСТАНОВИВ|ПОСТАНОВИЛА|УХВАЛИВ|УХВАЛИЛА|ВИРІШИВ|ВИРІШИЛА|ЗАСУДИВ|ЗАСУДИЛА)\s*:?\s*$/m;
@@ -388,7 +406,7 @@ export async function document(
         "unavailable",
       );
     }
-    body = htmlToText(res.body);
+    body = trimChrome(htmlToText(res.body));
     transit.set(id, body);
     lastDocAt = Date.now();
   }

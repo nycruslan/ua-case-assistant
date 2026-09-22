@@ -10,7 +10,7 @@
       "name": "ua-case-assistant",
       "source": "./plugins/ua-case-assistant",
       "description": "Ukrainian-law case assistant for a client and an advocate: case profile, analysis, chronology and evidence, deadlines, drafting, pre-filing check, monitoring, client explanations. Bundles an MCP server over data.rada.gov.ua open data, the Supreme Court legal-positions database and ЄДРСР.",
-      "version": "0.4.1"
+      "version": "0.5.0"
     }
   ]
 }
