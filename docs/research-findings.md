@@ -132,6 +132,33 @@ ruling, the opponent's response as a scan) in 11 formats, worked through the ski
 - **Removed as redundant**: `case_status_instructions` (a tool returning fixed text — now in the
   `case-monitor` skill) and `make_ics.py` (Claude writes the .ics from the skill's template).
 
+### Found by an independent audit from a second user's Mac (2026-10-10)
+A second user's Claude read the whole plugin and tested it live in a cloud session that runs tools on her
+Mac. 16 findings; each re-checked here before fixing. Verified:
+- **A dropped connection mid-way through a gzip body hung the source until restart.** `res.pipe(gunzip)`
+  does not forward errors and the socket idle timeout stops counting once the socket closes. Reproduced:
+  the old code hangs, `stream.pipeline` plus a hard per-attempt deadline settles.
+- **Some clients cap a tool call at 60 s** (the cloud-session-on-a-Mac setup). data.rada's 5–7 s pause made
+  a cold `rada_resolve «КПК»` take ~80 s. Measured after the fix: «still working» at 45 s, the repeated call
+  joined the same work and returned 4651-17. No limit was loosened.
+- **ЄДРСР's «Номер справи» field ignores a 17-digit ЄРДР number**; the same number as the text query finds
+  the proceeding's rulings (measured: 0 rows vs 4).
+- **Block words in a query or ruling looked like a block page.** `"доступ обмежено"` was reported as a
+  block; after the fix it returns 230 results. Block detection now runs only on a page with no results and
+  no decision.
+- **`/* … */` in data.rada texts marks a provision the Constitutional Court struck down**, with the
+  decision in a `{…}` marker inside. It is not simply «not in force»: КПК ст. 176 ч. 8 lost force on
+  24.09.2026, ст. 616 abz. 2 still applies until 15.01.2027, and «в тім, що…» rulings strike down one
+  aspect only. The date and scope are read from the marker.
+- **LPD's semantic search returned HTTP 502** (2026-10-10) while the lexical search worked.
+- **Every `rada_unit` call revalidated the text with the server** — a 5–7 s polite pause per call even when
+  nothing had changed. A cached copy is now reused while the act's metadata names the same redaction.
+- **The court prints the operative marker spaced or in lower case** («П О С Т А Н О В И В:»).
+- **«Глава 1» also matched «Глава 10»–«19»** in КПК, where the heading and title share a line.
+- **«Today» was the UTC date**, so a redaction in force from today read as future between 00:00 and 03:00.
+- **A Claude Code update leaves `~/.local/bin/claude` pointing at a deleted version** (the desktop app keeps
+  the CLI under `~/Library/Application Support/Claude/claude-code/<version>/<hash>/`).
+
 ### Engineering findings that cost real debugging time
 - **Superseded diagnosis, kept as a warning:** roughly a third of Node requests to data.rada died with
   `ECONNRESET` while curl never failed. It was first blamed on connection pooling, and a fresh

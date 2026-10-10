@@ -22,6 +22,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import pkg from "../package.json" with { type: "json" };
 
 import { SourceError } from "./http.ts";
 import {
@@ -30,6 +31,7 @@ import {
   getMeta,
   getText,
   isRealDate,
+  kyivToday,
   listUnits,
   MAX_UNIT_CHARS,
   RADA_STATUS_NOTE,
@@ -42,7 +44,8 @@ import * as lpd from "./lpd.ts";
 import * as edrsr from "./edrsr.ts";
 
 const server = new McpServer(
-  { name: "ua-legal-sources", version: "0.1.0" },
+  // One version for the plugin and its server; check-plugin enforces it.
+  { name: "ua-legal-sources", version: pkg.version },
   {
     instructions:
       "Українські правові джерела з локальної машини. Використовуй ці " +
@@ -121,6 +124,68 @@ async function guard(fn: () => Promise<unknown>) {
 }
 
 /**
+ * How long one tool call may take before it answers «still working».
+ *
+ * ☠️ Some clients cut a tool call off at 60 s (measured: a cloud session that
+ * uses the user's Mac as its device). data.rada asks for a 5–7 s pause between
+ * requests, so resolving a name with four candidates takes longer than that, and
+ * the user saw a bare timeout although the server finished the work.
+ */
+const TOOL_BUDGET_MS = 45_000;
+/** How long finished background work waits to be collected by a repeated call. */
+const KEEP_MS = 10 * 60_000;
+
+const running = new Map<string, { work: Promise<unknown>; at: number }>();
+
+/**
+ * Run a tool handler within TOOL_BUDGET_MS. Work still running at the deadline
+ * keeps going; the same call with the same arguments joins it instead of
+ * starting it again, so no request to a rate-limited source is spent twice.
+ */
+function budgeted<A, R>(name: string, handler: (args: A) => Promise<R>) {
+  return async (args: A) => {
+    const now = Date.now();
+    for (const [k, v] of running) if (now - v.at > KEEP_MS) running.delete(k);
+    const key = `${name}:${JSON.stringify(args)}`;
+    let entry = running.get(key);
+    if (!entry) {
+      entry = { work: handler(args), at: now };
+      running.set(key, entry);
+    }
+    const work = entry.work as Promise<R>;
+    let timer: NodeJS.Timeout | undefined;
+    const deadline = new Promise<"pending">((resolve) => {
+      timer = setTimeout(() => resolve("pending"), TOOL_BUDGET_MS);
+    });
+    const result = await Promise.race([work, deadline]);
+    clearTimeout(timer);
+    if (result !== "pending") {
+      running.delete(key);
+      return result;
+    }
+    return {
+      isError: true,
+      content: [
+        {
+          type: "text" as const,
+          text: JSON.stringify({
+            error:
+              `Джерело відповідає повільно (ліміти ввічливості державних сайтів), ` +
+              `тож відповідь ще не готова. Робота триває у фоні.`,
+            kind: "pending",
+            verified: false,
+            reminder:
+              "Повтори ТОЙ САМИЙ виклик з тими самими аргументами за 20–30 с — " +
+              "він отримає готовий результат без нового запиту. Не роби висновків " +
+              "і не відповідай з пам'яті, поки результату немає.",
+          }),
+        },
+      ],
+    };
+  };
+}
+
+/**
  * The act's text as it stood on `date` — or today — with an honest label.
  *
  * ☠️ data.rada answers ANY `/ed<date>` with HTTP 200, including dates before the
@@ -130,7 +195,7 @@ async function guard(fn: () => Promise<unknown>) {
  */
 async function textAsOf(rawNreg: string, date?: string) {
   const meta = await getMeta(rawNreg);
-  const current = () => getText(meta.nreg);
+  const current = () => getText(meta.nreg, undefined, meta.currentRedaction);
   if (!date) {
     return {
       meta,
@@ -146,7 +211,7 @@ async function textAsOf(rawNreg: string, date?: string) {
       "input",
     );
   }
-  const a = redactionAsOf(meta, date, now().slice(0, 10));
+  const a = redactionAsOf(meta, date, kyivToday());
   if (a.kind === "before") {
     return { meta, text: null, asOf: date, firstRedaction: a.firstRedaction };
   }
@@ -229,11 +294,11 @@ server.registerTool(
     },
     annotations: { readOnlyHint: true, openWorldHint: true },
   },
-  async ({ name }) =>
+  budgeted("rada_resolve", async ({ name }) =>
     guard(async () => {
       const r = await resolve(name);
       return { ...r, retrieved_at: now(), act_vs_article: RADA_STATUS_NOTE };
-    }),
+    })),
 );
 
 server.registerTool(
@@ -250,7 +315,7 @@ server.registerTool(
     },
     annotations: { readOnlyHint: true, openWorldHint: true },
   },
-  async ({ nreg }) =>
+  budgeted("rada_status", async ({ nreg }) =>
     guard(async () => {
       const meta = await getMeta(nreg);
       const card = await getCard(nreg);
@@ -281,7 +346,7 @@ server.registerTool(
         retrieved_at: now(),
         note: RADA_STATUS_NOTE,
       };
-    }),
+    })),
 );
 
 server.registerTool(
@@ -290,7 +355,8 @@ server.registerTool(
     title: "Текст статті або іншої одиниці акта",
     description:
       "Дослівний текст однієї статті, розділу, глави, підрозділу чи параграфа. " +
-      "Приймає «130», «ст.130», «1270», «111-1», «Розділ IV», «Підрозділ 1». " +
+      "Приймає «130», «ст.130», «1270», «111-1», «ч. 2 ст. 284», «п. 1 ч. 2 ст. 284», " +
+      "«Розділ IV», «Підрозділ 1», «Прикінцеві та перехідні положення п. 19». " +
       "Окремо позначає, що статтю ВИКЛЮЧЕНО, і яким законом. Службові " +
       "позначки про зміни у {фігурних дужках} віддаються окремо від тексту " +
       "норми, щоб вони не потрапили в цитату. Параметр date дає редакцію " +
@@ -315,7 +381,7 @@ server.registerTool(
     },
     annotations: { readOnlyHint: true, openWorldHint: true },
   },
-  async ({ nreg, unit, date }) =>
+  budgeted("rada_unit", async ({ nreg, unit, date }) =>
     guard(async () => {
       const t = await textAsOf(nreg, date);
       const { meta } = t;
@@ -323,7 +389,8 @@ server.registerTool(
         return beforeExisted(meta.nreg, meta.nazva, date!, t.firstRedaction!);
       }
       const text = t.text;
-      const index = buildIndex(text.body);
+      // Struck-down text is judged on the date the user asked about, not today.
+      const index = buildIndex(text.body, t.asOf ?? kyivToday());
       const u = sliceUnit(index, unit);
 
       if (!u.found) {
@@ -353,6 +420,22 @@ server.registerTool(
             `бути чинним, але цієї норми вже немає.`
           : undefined,
         amendment_markers: o.markers,
+        part_note: o.partNote,
+        unconstitutional: o.unconstitutional?.map((x) => ({
+          text: x.text,
+          lost_force_on: x.lostForceOn,
+          partial: x.partial,
+          in_force: x.inForce,
+          marker: x.marker,
+        })),
+        unconstitutional_warning: o.unconstitutional
+          ? `⚖️ Частину тексту Конституційний Суд визнав неконституційною. Те, що ` +
+            `вже не діє, з text прибрано; решту лишено, але перевір кожен пункт ` +
+            `unconstitutional: lost_force_on — з якої дати не діє, partial — ` +
+            `рішення стосується лише окремого аспекту («в тім, що…»), in_force: ` +
+            `null — дату з позначки визначити не вдалося. Не цитуй таку норму як ` +
+            `чинну, не звіривши дату й обсяг.`
+          : undefined,
         char_count: o.charCount,
         truncated_warning: o.truncated
           ? `Одиниця завелика: показано перші ${o.text.length} із ${o.charCount} ` +
@@ -395,7 +478,7 @@ server.registerTool(
         retrieved_at: text.retrievedAt,
         from_cache: text.fromCache,
       };
-    }),
+    })),
 );
 
 server.registerTool(
@@ -418,7 +501,7 @@ server.registerTool(
     },
     annotations: { readOnlyHint: true, openWorldHint: true },
   },
-  async ({ nreg, filter, date }) =>
+  budgeted("rada_list_units", async ({ nreg, filter, date }) =>
     guard(async () => {
       const t = await textAsOf(nreg, date);
       if (!t.text) {
@@ -455,7 +538,7 @@ server.registerTool(
         retrieved_at: text.retrievedAt,
         from_cache: text.fromCache,
       };
-    }),
+    })),
 );
 
 // ─────────────────────────────────────────────────────── court practice (ЛПД)
@@ -479,7 +562,7 @@ server.registerTool(
     },
     annotations: { readOnlyHint: true, openWorldHint: true },
   },
-  async ({ query, semantic, limit }) =>
+  budgeted("lpd_search", async ({ query, semantic, limit }) =>
     guard(async () => {
       const r = await lpd.searchPositions(query, semantic ?? false);
       return {
@@ -491,7 +574,7 @@ server.registerTool(
         note: r.note,
         retrieved_at: now(),
       };
-    }),
+    })),
 );
 
 server.registerTool(
@@ -504,13 +587,13 @@ server.registerTool(
     inputSchema: { id: ID },
     annotations: { readOnlyHint: true, openWorldHint: true },
   },
-  async ({ id }) =>
+  budgeted("lpd_position", async ({ id }) =>
     guard(async () => ({
       id,
       position: await lpd.position(id),
       source_url: `${lpd.SITE}/legal-position/${id}`,
       retrieved_at: now(),
-    })),
+    }))),
 );
 
 server.registerTool(
@@ -524,12 +607,12 @@ server.registerTool(
     inputSchema: { query: z.string().min(3).max(500) },
     annotations: { readOnlyHint: true, openWorldHint: true },
   },
-  async ({ query }) =>
+  budgeted("lpd_digest_search", async ({ query }) =>
     guard(async () => ({
       query,
       ...(await lpd.searchDigests(query)),
       retrieved_at: now(),
-    })),
+    }))),
 );
 
 // ───────────────────────────────────────────────────────────── ЄДРСР tools
@@ -563,7 +646,7 @@ server.registerTool(
     },
     annotations: { readOnlyHint: true, openWorldHint: true },
   },
-  async (args) =>
+  budgeted("edrsr_search", async (args) =>
     guard(async () => {
       if (
         !args.expression &&
@@ -595,7 +678,7 @@ server.registerTool(
         anonymisation: edrsr.ANONYMISATION_NOTE,
         retrieved_at: now(),
       };
-    }),
+    })),
 );
 
 server.registerTool(
@@ -616,14 +699,14 @@ server.registerTool(
     },
     annotations: { readOnlyHint: true, openWorldHint: true },
   },
-  async ({ id, mode, needle }) =>
+  budgeted("edrsr_document", async ({ id, mode, needle }) =>
     guard(async () => ({
       ...(await edrsr.document(id, mode ?? "head", needle)),
       documents_used: edrsr.docsFetched().length,
       documents_budget: edrsr.MAX_DOCS,
       anonymisation: edrsr.ANONYMISATION_NOTE,
       retrieved_at: now(),
-    })),
+    }))),
 );
 
 const transport = new StdioServerTransport();

@@ -72,6 +72,18 @@ const client = new Client({ name: "plugin-check", version: "0.0.1" });
 await client.connect(transport);
 const { tools } = await client.listTools();
 
+// One version everywhere: the server reports package.json's, the plugin and the
+// marketplace declare their own, and a mismatch means one was not bumped.
+const read = (p: string) => JSON.parse(readFileSync(join(repoRoot, p), "utf8"));
+const versions = {
+  server: client.getServerVersion()?.version,
+  "plugin.json": read("plugins/ua-case-assistant/.claude-plugin/plugin.json").version,
+  "marketplace.json": read(".claude-plugin/marketplace.json").plugins[0].version,
+};
+if (new Set(Object.values(versions)).size !== 1) {
+  throw new Error(`version mismatch: ${JSON.stringify(versions)}`);
+}
+
 // The bundle must expose the same surface as the source.
 const expected = [
   "rada_resolve",

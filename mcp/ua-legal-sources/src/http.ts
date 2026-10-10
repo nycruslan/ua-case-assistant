@@ -115,10 +115,13 @@ export type ErrorKind =
 
 export class SourceError extends Error {
   kind: ErrorKind;
-  constructor(message: string, kind: ErrorKind) {
+  /** The HTTP status, when the source answered with one. */
+  status?: number;
+  constructor(message: string, kind: ErrorKind, status?: number) {
     super(message);
     this.name = "SourceError";
     this.kind = kind;
+    this.status = status;
   }
 }
 
@@ -180,6 +183,14 @@ export function request(
  */
 const RETRY_BACKOFF_MS = [2000, 5000];
 
+/**
+ * Deadline for one attempt, connect to last byte. The largest response here is
+ * a whole code (ЦК, 1.8 MB), measured at well under 10 s. A tool call itself is
+ * capped at 60 s in some clients, so a single stalled attempt must end long
+ * before that — see TOOL_BUDGET_MS in index.ts.
+ */
+const ATTEMPT_TIMEOUT_MS = 30_000;
+
 async function attempt(
   host: HostKey,
   opts: RequestOptions,
@@ -232,7 +243,7 @@ async function requestOnce(
       headers,
       body,
       noRedirect: opts.noRedirect,
-      timeoutMs: opts.timeoutMs ?? 90_000,
+      timeoutMs: opts.timeoutMs ?? ATTEMPT_TIMEOUT_MS,
       tlsMaxVersion: p.tlsMaxVersion,
     });
     lastRequestAt[host] = Date.now();
@@ -247,19 +258,29 @@ async function requestOnce(
   } catch (err) {
     lastRequestAt[host] = Date.now();
     if (err instanceof TransportError && err.timedOut) {
-      // ☠️ A hang has two causes, and they demand opposite reactions.
+      // ☠️ A stall has three causes, and they demand different reactions.
+      if (err.gotResponse) {
+        // The server answered and then stopped mid-body: a broken connection,
+        // transient by nature, so it is retried like any network failure.
+        throw new SourceError(
+          `${host}: сайт почав відповідати, але не завершив передачу. Це збій ` +
+            `з'єднання, а НЕ відсутність документа.`,
+          "network",
+        );
+      }
       const seen = okCount[host] ?? 0;
       if (seen > 0) {
         throw new SourceError(
           `${host}: тайм-аут без відповіді після ${seen} успішних запитів. ` +
-            `Це м'який rate limit — зачекай перед повторною спробою. ` +
+            `Схоже на м'який rate limit — зачекай перед повторною спробою. ` +
             `Це НЕ означає, що документа не існує.`,
           "cooldown",
         );
       }
       throw new SourceError(
-        `${host}: тайм-аут на першому ж запиті, без тіла відповіді. ` +
-          `Зазвичай це проблема із заголовками запиту, а не збій сайту.`,
+        `${host}: перший запит без жодної відповіді. Причиною може бути збій ` +
+          `сайту чи мережі або заголовки запиту. Це НЕ означає, що документа ` +
+          `не існує.`,
         "headers",
       );
     }

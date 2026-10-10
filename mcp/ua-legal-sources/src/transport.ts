@@ -27,9 +27,12 @@
  * Using stdlib rather than undici keeps the server dependency-free, so it
  * bundles into the plugin as a single file and users never run `npm install`.
  */
+import { request as httpRequestRaw, type IncomingMessage } from "node:http";
 import { request as httpsRequest } from "node:https";
+import type { Socket } from "node:net";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import { createBrotliDecompress, createGunzip, createInflate } from "node:zlib";
-import type { IncomingMessage } from "node:http";
 
 export interface HttpResponse {
   status: number;
@@ -44,6 +47,7 @@ export interface HttpOptions {
   body?: string;
   /** Stop at a 3xx and return it, so the Location header can be read. */
   noRedirect?: boolean;
+  /** Hard deadline for the whole exchange, connect to last byte. */
   timeoutMs: number;
   /** Cap the TLS version. Required for the rada hosts — see the note above. */
   tlsMaxVersion?: "TLSv1.2" | "TLSv1.3";
@@ -52,26 +56,51 @@ export interface HttpOptions {
 /** Thrown for transport-level failures only; an HTTP status is a result. */
 export class TransportError extends Error {
   timedOut: boolean;
-  constructor(message: string, timedOut = false) {
+  /** For a timeout: did the server answer at all before it stalled? */
+  gotResponse: boolean;
+  constructor(message: string, timedOut = false, gotResponse = false) {
     super(message);
     this.name = "TransportError";
     this.timedOut = timedOut;
+    this.gotResponse = gotResponse;
   }
 }
 
 const MAX_REDIRECTS = 3;
 
-function decompress(res: IncomingMessage): NodeJS.ReadableStream {
-  switch ((res.headers["content-encoding"] ?? "").toLowerCase()) {
+function decoderFor(encoding: string | undefined) {
+  switch ((encoding ?? "").toLowerCase()) {
     case "gzip":
-      return res.pipe(createGunzip());
+      return createGunzip();
     case "deflate":
-      return res.pipe(createInflate());
+      return createInflate();
     case "br":
-      return res.pipe(createBrotliDecompress());
+      return createBrotliDecompress();
     default:
-      return res;
+      return undefined;
   }
+}
+
+/**
+ * Read and decompress a response body.
+ *
+ * ☠️ `res.pipe(createGunzip())` does not forward errors: when a server dropped
+ * the connection in the middle of a compressed body, the response errored, the
+ * decompressor never ended, and the request hung forever — every later request
+ * to that host queued behind it until the app restarted. `pipeline` propagates
+ * a failure from any stage and destroys the others.
+ */
+export async function readBody(
+  res: Readable & { headers: IncomingMessage["headers"] },
+): Promise<string> {
+  const chunks: Buffer[] = [];
+  const sink = async (source: AsyncIterable<Buffer>) => {
+    for await (const chunk of source) chunks.push(chunk);
+  };
+  const decoder = decoderFor(res.headers["content-encoding"] as string | undefined);
+  if (decoder) await pipeline(res, decoder, sink);
+  else await pipeline(res, sink);
+  return Buffer.concat(chunks).toString("utf8");
 }
 
 function flatten(res: IncomingMessage): Record<string, string> {
@@ -83,9 +112,75 @@ function flatten(res: IncomingMessage): Record<string, string> {
   return out;
 }
 
-function once(url: string, opts: HttpOptions): Promise<HttpResponse> {
+/**
+ * The proxy to use for `target`, from HTTPS_PROXY / NO_PROXY, if any.
+ *
+ * Cloud sandboxes reach the internet only through such a proxy; connecting
+ * directly there fails with ENOTFOUND.
+ */
+export function proxyFor(target: URL, env = process.env): URL | undefined {
+  const raw = env.HTTPS_PROXY ?? env.https_proxy;
+  if (!raw) return undefined;
+  const host = target.hostname.toLowerCase();
+  const bypass = (env.NO_PROXY ?? env.no_proxy ?? "")
+    .split(",")
+    .map((s) => s.trim().toLowerCase().replace(/^\*?\./, ""))
+    .filter(Boolean);
+  if (bypass.some((d) => d === "*" || host === d || host.endsWith(`.${d}`))) {
+    return undefined;
+  }
+  return new URL(raw.includes("://") ? raw : `http://${raw}`);
+}
+
+/** Open a CONNECT tunnel through `proxy` to `target`. */
+function tunnel(proxy: URL, target: URL, timeoutMs: number): Promise<Socket> {
   return new Promise((resolve, reject) => {
-    const target = new URL(url);
+    const auth = proxy.username
+      ? {
+          "Proxy-Authorization":
+            "Basic " +
+            Buffer.from(
+              `${decodeURIComponent(proxy.username)}:${decodeURIComponent(proxy.password)}`,
+            ).toString("base64"),
+        }
+      : {};
+    const authority = `${target.hostname}:${target.port || 443}`;
+    const req = httpRequestRaw({
+      host: proxy.hostname,
+      port: proxy.port || 80,
+      method: "CONNECT",
+      path: authority,
+      headers: { Host: authority, ...auth },
+      agent: false,
+    });
+    const timer = setTimeout(
+      () => req.destroy(new TransportError("timeout", true)),
+      timeoutMs,
+    );
+    req.on("connect", (res, socket) => {
+      clearTimeout(timer);
+      if (res.statusCode === 200) resolve(socket);
+      else {
+        socket.destroy();
+        reject(new TransportError(`proxy refused CONNECT: HTTP ${res.statusCode}`));
+      }
+    });
+    req.on("error", (err) => {
+      clearTimeout(timer);
+      reject(err instanceof TransportError ? err : new TransportError(`proxy: ${err.message}`));
+    });
+    req.end();
+  });
+}
+
+async function once(url: string, opts: HttpOptions): Promise<HttpResponse> {
+  const target = new URL(url);
+  const proxy = proxyFor(target);
+  const socket = proxy ? await tunnel(proxy, target, opts.timeoutMs) : undefined;
+
+  return new Promise((resolve, reject) => {
+    let gotResponse = false;
+    let timedOut = false;
     const req = httpsRequest(
       {
         protocol: target.protocol,
@@ -96,45 +191,57 @@ function once(url: string, opts: HttpOptions): Promise<HttpResponse> {
         headers: opts.headers,
         // No pool to race at one request per five seconds.
         agent: false,
-        timeout: opts.timeoutMs,
+        // Through a proxy, TLS runs inside the CONNECT tunnel.
+        ...(socket ? { socket } : {}),
         // ☠️ Load-bearing for the rada hosts. See the note at the top.
         ...(opts.tlsMaxVersion ? { maxVersion: opts.tlsMaxVersion } : {}),
       },
       (res) => {
+        gotResponse = true;
         // A 304 has no body by definition; reading it would hang on some hosts.
         if (res.statusCode === 304) {
           res.resume();
+          clearTimeout(timer);
           resolve({ status: 304, headers: flatten(res), body: "" });
           return;
         }
-        const chunks: Buffer[] = [];
-        const stream = decompress(res);
-        stream.on("data", (c: Buffer) => chunks.push(c));
-        stream.on("end", () =>
-          resolve({
-            status: res.statusCode ?? 0,
-            headers: flatten(res),
-            body: Buffer.concat(chunks).toString("utf8"),
-          }),
-        );
-        stream.on("error", (err: Error) =>
-          reject(new TransportError(`response stream: ${err.message}`)),
+        readBody(res).then(
+          (body) => {
+            clearTimeout(timer);
+            resolve({ status: res.statusCode ?? 0, headers: flatten(res), body });
+          },
+          (err: Error) => {
+            clearTimeout(timer);
+            reject(
+              timedOut
+                ? new TransportError("timeout", true, true)
+                : new TransportError(`response stream: ${err.message}`),
+            );
+          },
         );
       },
     );
 
-    req.on("timeout", () => {
-      // `timeout` does not abort on its own; destroy with a marked error so the
-      // caller can tell a hang from a refusal — they demand opposite reactions.
-      req.destroy(new TransportError("timeout", true));
-    });
-    req.on("error", (err: Error) =>
+    // ☠️ A hard deadline for the whole exchange, not a socket idle timeout: an
+    // idle timeout stops counting once the socket closes, which is exactly when
+    // a half-received response used to hang. Destroying the request settles
+    // every stage, and the flag tells a hang from a refusal — they demand
+    // opposite reactions.
+    const timer = setTimeout(() => {
+      timedOut = true;
+      req.destroy(new TransportError("timeout", true, gotResponse));
+    }, opts.timeoutMs);
+
+    req.on("error", (err: Error) => {
+      clearTimeout(timer);
       reject(
-        err instanceof TransportError
-          ? err
-          : new TransportError(err.message),
-      ),
-    );
+        timedOut
+          ? new TransportError("timeout", true, gotResponse)
+          : err instanceof TransportError
+            ? err
+            : new TransportError(err.message),
+      );
+    });
     if (opts.body !== undefined) req.write(opts.body);
     req.end();
   });

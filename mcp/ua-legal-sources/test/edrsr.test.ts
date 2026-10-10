@@ -14,6 +14,8 @@ import assert from "node:assert/strict";
 import {
   courtDateRange,
   filterByCase,
+  findOperative,
+  isErdr,
   hasDecision,
   parseFound,
   parseRows,
@@ -192,4 +194,23 @@ test("a decision page keeps the decision and drops the site around it", () => {
   assert.match(text, /Головуючий В\. І\. Крат$/);
   // No marker, no guessing: the text is kept whole.
   assert.equal(trimChrome("просто текст"), "просто текст");
+});
+
+test("the operative part is found in spaced and lower-case spellings, last one wins", () => {
+  for (const marker of ["ПОСТАНОВИВ:", "П О С Т А Н О В И В:", "у х в а л и в:", "Ухвалила :"]) {
+    const text = `ВСТАНОВИВ:\nобставини\n${marker}\nскаргу задовольнити`;
+    assert.equal(text.slice(findOperative(text)).split("\n")[1], "скаргу задовольнити", marker);
+  }
+  // An appeal ruling quoting the first instance: the court's own marker is last.
+  const appeal = "УХВАЛИВ:\nцитата суду першої інстанції\nПОСТАНОВИВ:\nапеляцію відхилити";
+  assert.match(appeal.slice(findOperative(appeal)), /^ПОСТАНОВИВ:\nапеляцію/);
+  // A sentence that merely contains the word is not a marker.
+  assert.equal(findOperative("суд постановив: стягнути борг"), -1);
+});
+
+test("a 17-digit ЄРДР number is recognised, a court case number is not", () => {
+  assert.equal(isErdr("12016100020003529"), true);
+  assert.equal(isErdr("1201610002 0003529"), true);
+  assert.equal(isErdr("761/45809/19"), false);
+  assert.equal(isErdr(undefined), false);
 });

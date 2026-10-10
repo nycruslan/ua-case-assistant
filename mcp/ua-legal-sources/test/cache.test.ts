@@ -28,3 +28,19 @@ test("a truncated or foreign file is a miss, not a crash", async () => {
     assert.equal(await readCache("probe"), undefined, junk);
   }
 });
+
+test("an unexpanded or relative cache variable falls back to the home cache", async () => {
+  // ☠️ A client that does not expand ${CLAUDE_PLUGIN_DATA} hands over the literal.
+  const { cacheRoot } = await import("../src/cache.ts");
+  const home = cacheRoot({});
+  assert.match(home, /\.cache\/ua-legal-sources$/);
+  assert.equal(cacheRoot({ UA_LEGAL_CACHE_DIR: "${CLAUDE_PLUGIN_DATA}/cache" }), home);
+  assert.equal(cacheRoot({ UA_LEGAL_CACHE_DIR: "relative/cache" }), home);
+  assert.equal(cacheRoot({ UA_LEGAL_CACHE_DIR: "/data/plugin/cache" }), "/data/plugin/cache");
+});
+
+test("an entry is served from memory when the disk copy is gone", async () => {
+  await writeCache("mem", { body: "у пам'яті", fetchedAt: new Date().toISOString() });
+  rmSync(dir, { recursive: true, force: true });
+  assert.equal((await readCache("mem"))?.body, "у пам'яті");
+});

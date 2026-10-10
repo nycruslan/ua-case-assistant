@@ -42,6 +42,22 @@ find_node() {
       "$mgr" which node 2>/dev/null && return 0
     fi
   done
+  # nvm and fnm keep one directory per version and no shim: take the newest.
+  newest=$(
+    for candidate in \
+      "$HOME"/.nvm/versions/node/v*/bin/node \
+      "$HOME"/.local/share/fnm/node-versions/v*/installation/bin/node \
+      "$HOME/Library/Application Support/fnm/node-versions"/v*/installation/bin/node
+    do
+      [ -x "$candidate" ] || continue
+      version=$(printf '%s\n' "$candidate" | sed 's|.*/v\([0-9][0-9.]*\)/.*|\1|')
+      printf '%s\t%s\n' "$version" "$candidate"
+    done | sort -t . -k 1,1nr -k 2,2nr -k 3,3nr | head -n 1 | cut -f 2-
+  )
+  if [ -n "$newest" ]; then
+    printf '%s\n' "$newest"
+    return 0
+  fi
   return 1
 }
 

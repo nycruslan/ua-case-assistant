@@ -10,6 +10,7 @@
     "verbatimModuleSyntax": true,
     "noEmit": true,
     "strict": true,
+    "resolveJsonModule": true,
     "skipLibCheck": true,
     "types": ["node"]
   },

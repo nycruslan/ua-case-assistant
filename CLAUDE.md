@@ -35,8 +35,9 @@ Ukrainian. Started in Claude Cowork on 2026-09-20, developed in Claude Code sinc
 - Case documents and personal data never go into this repo (see `.gitignore`). The case folder lives elsewhere.
 - Skills are written in Ukrainian; keep them in Ukrainian. Frontmatter descriptions stay English with
   Ukrainian trigger phrases.
-- After changing the plugin: `claude plugin validate ./plugins/ua-case-assistant`, bump `version` in both
-  `plugin.json` and `marketplace.json`, then `/reload-plugins`.
+- After changing the plugin: `claude plugin validate ./plugins/ua-case-assistant`, bump `version` in
+  `plugin.json`, `marketplace.json` and `mcp/ua-legal-sources/package.json` (the server reports it;
+  `npm run check-plugin` fails on a mismatch), then `/reload-plugins`.
 - After changing the MCP server: `cd mcp/ua-legal-sources && npx tsc --noEmit && npm test`, then
   **`npm run build`** to refresh the bundle the plugin ships, then `npm run check-plugin` (it fails if the
   bundle is older than `src/`). `npm run smoke` hits the live sources and spends real requests — run it

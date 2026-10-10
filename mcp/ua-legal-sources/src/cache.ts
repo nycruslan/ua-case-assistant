@@ -15,17 +15,51 @@
 import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 
-const ROOT =
-  process.env.UA_LEGAL_CACHE_DIR ??
-  join(homedir(), ".cache", "ua-legal-sources");
+/**
+ * Where the disk cache lives.
+ *
+ * ☠️ The plugin passes `${CLAUDE_PLUGIN_DATA}/cache`. A client that does not
+ * expand the variable hands over that literal string — a relative path, so
+ * every write failed silently and every call fetched a whole code again.
+ * Anything that is not a usable absolute path falls back to the home cache.
+ */
+export function cacheRoot(env: NodeJS.ProcessEnv = process.env): string {
+  const dir = env.UA_LEGAL_CACHE_DIR;
+  return dir && isAbsolute(dir) && !dir.includes("${")
+    ? dir
+    : join(homedir(), ".cache", "ua-legal-sources");
+}
+
+const ROOT = cacheRoot();
 
 export interface CachedText {
   body: string;
   /** Last-Modified as the server sent it, for a later If-Modified-Since. */
   lastModified?: string;
   fetchedAt: string;
+  /** For an act's current text: the redaction it holds, YYYY-MM-DD. */
+  redaction?: string;
+}
+
+/**
+ * The last few entries, in memory. A disk that cannot be written must not mean
+ * fetching a 1.8 MB code on every call of the same session.
+ */
+const recent = new Map<string, CachedText>();
+const RECENT_MAX = 4;
+
+function remember(key: string, value: CachedText): void {
+  recent.delete(key);
+  recent.set(key, value);
+  if (recent.size > RECENT_MAX) recent.delete(recent.keys().next().value!);
+}
+
+function fresh(entry: CachedText, maxAgeMs?: number): boolean {
+  if (maxAgeMs === undefined) return true;
+  const age = Date.now() - Date.parse(entry.fetchedAt);
+  return Number.isFinite(age) && age <= maxAgeMs;
 }
 
 function keyPath(key: string): string {
@@ -38,6 +72,8 @@ export async function readCache(
   key: string,
   maxAgeMs?: number,
 ): Promise<CachedText | undefined> {
+  const mem = recent.get(key);
+  if (mem) return fresh(mem, maxAgeMs) ? mem : undefined;
   try {
     const raw = await readFile(keyPath(key), "utf8");
     const entry = JSON.parse(raw) as CachedText;
@@ -45,10 +81,8 @@ export async function readCache(
     if (typeof entry?.body !== "string" || typeof entry?.fetchedAt !== "string") {
       return undefined;
     }
-    if (maxAgeMs !== undefined) {
-      const age = Date.now() - Date.parse(entry.fetchedAt);
-      if (!Number.isFinite(age) || age > maxAgeMs) return undefined;
-    }
+    if (!fresh(entry, maxAgeMs)) return undefined;
+    remember(key, entry);
     return entry;
   } catch {
     return undefined;
@@ -56,6 +90,7 @@ export async function readCache(
 }
 
 export async function writeCache(key: string, value: CachedText): Promise<void> {
+  remember(key, value);
   try {
     await mkdir(ROOT, { recursive: true });
     await writeFile(keyPath(key), JSON.stringify(value), "utf8");

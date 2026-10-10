@@ -14,12 +14,14 @@ import { join } from "node:path";
 import {
   buildIndex,
   isRealDate,
+  kyivToday,
   listUnits,
   MAX_UNIT_CHARS,
   normalizeNreg,
   parseCard,
   parseHistory,
   parseNregList,
+  partAddress,
   redactionAsOf,
   selectAct,
   sliceUnit,
@@ -635,4 +637,65 @@ test("a short amending law: its numbered points are addressable", () => {
 test("a bare point in a code is refused, not matched against every article part", () => {
   const r = sliceUnit(buildIndex(read("cc-excerpt.txt")), "п. 2");
   assert.equal(r.found, false);
+});
+
+// ───────────────────── КПК: struck-down text, chapters, parts (verbatim, 2026-10-10)
+
+const kpk = (on: string) => buildIndex(read("kpk-excerpt.txt"), on);
+
+test("struck-down text that no longer applies leaves the quotable text", () => {
+  // ☠️ КПК ст. 176 ч. 8: unconstitutional from 24.06.2026, lost force three
+  // months later. It reached `text` as if it were law.
+  const after = sliceUnit(kpk("2026-10-10"), "176").occurrences[0];
+  assert.doesNotMatch(after.text, /військовослужбовців/);
+  assert.match(after.text, /^8\. \[визнано неконституційним, не діє з 24\.09\.2026/m);
+  assert.deepEqual(
+    after.unconstitutional?.map((u) => [u.lostForceOn, u.inForce, u.partial]),
+    [["2026-09-24", false, false]],
+  );
+  // Before that date it still applied, and is kept — flagged.
+  const before = sliceUnit(kpk("2026-08-01"), "176").occurrences[0];
+  assert.match(before.text, /військовослужбовців/);
+  assert.equal(before.unconstitutional?.[0].inForce, true);
+});
+
+test("struck-down text whose deadline has not come is kept and flagged", () => {
+  // КПК ст. 616: decided 15.07.2026, loses force six months later.
+  const o = sliceUnit(kpk("2026-10-10"), "616").occurrences[0];
+  assert.equal(o.unconstitutional?.[0].lostForceOn, "2027-01-15");
+  assert.equal(o.unconstitutional?.[0].inForce, true);
+  assert.doesNotMatch(o.text, /\/\*|\*\//);
+});
+
+test("a ruling against one aspect («в тім, що») keeps the text, marked partial", () => {
+  const o = sliceUnit(kpk("2026-10-10"), "307").occurrences[0];
+  const u = o.unconstitutional?.[0];
+  assert.equal(u?.partial, true);
+  assert.equal(u?.lostForceOn, "2026-07-21");
+  assert.doesNotMatch(o.text, /не діє з/);
+});
+
+test("«Глава 1» is chapter 1 only, not chapters 10–19", () => {
+  const r = sliceUnit(kpk("2026-10-10"), "Глава 1");
+  assert.equal(r.occurrences.length, 1);
+  assert.match(r.occurrences[0].heading, /^Глава 1\. /);
+  assert.equal(r.ambiguous, false);
+});
+
+test("a part and a point of an article are addressable the way lawyers cite them", () => {
+  const two = sliceUnit(kpk("2026-10-10"), "ч. 2 ст. 176").occurrences[0];
+  assert.match(two.text, /^Стаття 176\..*\n2\. Тимчасовим запобіжним заходом/);
+  assert.doesNotMatch(two.text, /^3\. /m);
+  const point = sliceUnit(kpk("2026-10-10"), "п. 5 ч. 1 ст. 176").occurrences[0];
+  assert.equal(point.text.split("\n")[1], "5) тримання під вартою.");
+  const missing = sliceUnit(kpk("2026-10-10"), "ч. 9 ст. 176").occurrences[0];
+  assert.match(missing.partNote ?? "", /показано всю статтю/);
+  assert.equal(partAddress("Прикінцеві та перехідні положення п. 19"), undefined);
+  assert.equal(partAddress("176"), undefined);
+  assert.deepEqual(partAddress("статті 284 частина 2"), { article: "284", part: "2", point: undefined });
+});
+
+test("today is the Kyiv date, not the UTC one", () => {
+  // 01:30 in Kyiv on the 10th is still the 9th in UTC.
+  assert.equal(kyivToday(new Date("2026-10-09T22:30:00Z")), "2026-10-10");
 });

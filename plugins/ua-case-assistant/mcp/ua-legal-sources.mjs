@@ -36476,29 +36476,71 @@ var StdioServerTransport = class {
   }
 };
 
+// package.json
+var package_default = {
+  name: "ua-legal-sources",
+  version: "0.6.0",
+  description: "Local MCP server for Ukrainian legal sources (data.rada, \u0404\u0414\u0420\u0421\u0420, \u041B\u041F\u0414 \u0412\u0421).",
+  scripts: {
+    test: "node --experimental-strip-types --test test/*.test.ts",
+    smoke: "node --experimental-strip-types test/smoke.ts",
+    start: "node --experimental-strip-types src/index.ts",
+    "check-config": "node --experimental-strip-types test/config-check.ts",
+    "check-protocol": "node --experimental-strip-types test/protocol.ts",
+    build: "esbuild src/index.ts --bundle --platform=node --format=esm --target=node20 --outfile=../../plugins/ua-case-assistant/mcp/ua-legal-sources.mjs --legal-comments=none",
+    "check-plugin": "node --experimental-strip-types test/plugin-check.ts"
+  },
+  license: "Apache-2.0",
+  type: "module",
+  dependencies: {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    zod: "^4.6.5"
+  },
+  devDependencies: {
+    "@types/node": "^26.6.2",
+    esbuild: "^0.28.2",
+    typescript: "^7.0.2"
+  }
+};
+
 // src/transport.ts
+import { request as httpRequestRaw } from "node:http";
 import { request as httpsRequest } from "node:https";
+import { pipeline } from "node:stream/promises";
 import { createBrotliDecompress, createGunzip, createInflate } from "node:zlib";
 var TransportError = class extends Error {
   timedOut;
-  constructor(message, timedOut = false) {
+  /** For a timeout: did the server answer at all before it stalled? */
+  gotResponse;
+  constructor(message, timedOut = false, gotResponse = false) {
     super(message);
     this.name = "TransportError";
     this.timedOut = timedOut;
+    this.gotResponse = gotResponse;
   }
 };
 var MAX_REDIRECTS = 3;
-function decompress(res) {
-  switch ((res.headers["content-encoding"] ?? "").toLowerCase()) {
+function decoderFor(encoding) {
+  switch ((encoding ?? "").toLowerCase()) {
     case "gzip":
-      return res.pipe(createGunzip());
+      return createGunzip();
     case "deflate":
-      return res.pipe(createInflate());
+      return createInflate();
     case "br":
-      return res.pipe(createBrotliDecompress());
+      return createBrotliDecompress();
     default:
-      return res;
+      return void 0;
   }
+}
+async function readBody(res) {
+  const chunks = [];
+  const sink = async (source) => {
+    for await (const chunk of source) chunks.push(chunk);
+  };
+  const decoder = decoderFor(res.headers["content-encoding"]);
+  if (decoder) await pipeline(res, decoder, sink);
+  else await pipeline(res, sink);
+  return Buffer.concat(chunks).toString("utf8");
 }
 function flatten(res) {
   const out = {};
@@ -36508,9 +36550,58 @@ function flatten(res) {
   }
   return out;
 }
-function once(url2, opts) {
+function proxyFor(target, env = process.env) {
+  const raw = env.HTTPS_PROXY ?? env.https_proxy;
+  if (!raw) return void 0;
+  const host = target.hostname.toLowerCase();
+  const bypass = (env.NO_PROXY ?? env.no_proxy ?? "").split(",").map((s) => s.trim().toLowerCase().replace(/^\*?\./, "")).filter(Boolean);
+  if (bypass.some((d) => d === "*" || host === d || host.endsWith(`.${d}`))) {
+    return void 0;
+  }
+  return new URL(raw.includes("://") ? raw : `http://${raw}`);
+}
+function tunnel(proxy, target, timeoutMs) {
   return new Promise((resolve2, reject) => {
-    const target = new URL(url2);
+    const auth = proxy.username ? {
+      "Proxy-Authorization": "Basic " + Buffer.from(
+        `${decodeURIComponent(proxy.username)}:${decodeURIComponent(proxy.password)}`
+      ).toString("base64")
+    } : {};
+    const authority = `${target.hostname}:${target.port || 443}`;
+    const req = httpRequestRaw({
+      host: proxy.hostname,
+      port: proxy.port || 80,
+      method: "CONNECT",
+      path: authority,
+      headers: { Host: authority, ...auth },
+      agent: false
+    });
+    const timer = setTimeout(
+      () => req.destroy(new TransportError("timeout", true)),
+      timeoutMs
+    );
+    req.on("connect", (res, socket) => {
+      clearTimeout(timer);
+      if (res.statusCode === 200) resolve2(socket);
+      else {
+        socket.destroy();
+        reject(new TransportError(`proxy refused CONNECT: HTTP ${res.statusCode}`));
+      }
+    });
+    req.on("error", (err) => {
+      clearTimeout(timer);
+      reject(err instanceof TransportError ? err : new TransportError(`proxy: ${err.message}`));
+    });
+    req.end();
+  });
+}
+async function once(url2, opts) {
+  const target = new URL(url2);
+  const proxy = proxyFor(target);
+  const socket = proxy ? await tunnel(proxy, target, opts.timeoutMs) : void 0;
+  return new Promise((resolve2, reject) => {
+    let gotResponse = false;
+    let timedOut = false;
     const req = httpsRequest(
       {
         protocol: target.protocol,
@@ -36521,42 +36612,43 @@ function once(url2, opts) {
         headers: opts.headers,
         // No pool to race at one request per five seconds.
         agent: false,
-        timeout: opts.timeoutMs,
+        // Through a proxy, TLS runs inside the CONNECT tunnel.
+        ...socket ? { socket } : {},
         // ☠️ Load-bearing for the rada hosts. See the note at the top.
         ...opts.tlsMaxVersion ? { maxVersion: opts.tlsMaxVersion } : {}
       },
       (res) => {
+        gotResponse = true;
         if (res.statusCode === 304) {
           res.resume();
+          clearTimeout(timer);
           resolve2({ status: 304, headers: flatten(res), body: "" });
           return;
         }
-        const chunks = [];
-        const stream = decompress(res);
-        stream.on("data", (c) => chunks.push(c));
-        stream.on(
-          "end",
-          () => resolve2({
-            status: res.statusCode ?? 0,
-            headers: flatten(res),
-            body: Buffer.concat(chunks).toString("utf8")
-          })
-        );
-        stream.on(
-          "error",
-          (err) => reject(new TransportError(`response stream: ${err.message}`))
+        readBody(res).then(
+          (body) => {
+            clearTimeout(timer);
+            resolve2({ status: res.statusCode ?? 0, headers: flatten(res), body });
+          },
+          (err) => {
+            clearTimeout(timer);
+            reject(
+              timedOut ? new TransportError("timeout", true, true) : new TransportError(`response stream: ${err.message}`)
+            );
+          }
         );
       }
     );
-    req.on("timeout", () => {
-      req.destroy(new TransportError("timeout", true));
+    const timer = setTimeout(() => {
+      timedOut = true;
+      req.destroy(new TransportError("timeout", true, gotResponse));
+    }, opts.timeoutMs);
+    req.on("error", (err) => {
+      clearTimeout(timer);
+      reject(
+        timedOut ? new TransportError("timeout", true, gotResponse) : err instanceof TransportError ? err : new TransportError(err.message)
+      );
     });
-    req.on(
-      "error",
-      (err) => reject(
-        err instanceof TransportError ? err : new TransportError(err.message)
-      )
-    );
     if (opts.body !== void 0) req.write(opts.body);
     req.end();
   });
@@ -36638,10 +36730,13 @@ async function throttle(host) {
 }
 var SourceError = class extends Error {
   kind;
-  constructor(message, kind) {
+  /** The HTTP status, when the source answered with one. */
+  status;
+  constructor(message, kind, status) {
     super(message);
     this.name = "SourceError";
     this.kind = kind;
+    this.status = status;
   }
 };
 var inFlight = {};
@@ -36653,6 +36748,7 @@ function request(host, opts) {
   return queued;
 }
 var RETRY_BACKOFF_MS = [2e3, 5e3];
+var ATTEMPT_TIMEOUT_MS = 3e4;
 async function attempt(host, opts) {
   for (let i = 0; ; i++) {
     try {
@@ -36691,7 +36787,7 @@ async function requestOnce(host, opts) {
       headers,
       body,
       noRedirect: opts.noRedirect,
-      timeoutMs: opts.timeoutMs ?? 9e4,
+      timeoutMs: opts.timeoutMs ?? ATTEMPT_TIMEOUT_MS,
       tlsMaxVersion: p.tlsMaxVersion
     });
     lastRequestAt[host] = Date.now();
@@ -36706,15 +36802,21 @@ async function requestOnce(host, opts) {
   } catch (err) {
     lastRequestAt[host] = Date.now();
     if (err instanceof TransportError && err.timedOut) {
+      if (err.gotResponse) {
+        throw new SourceError(
+          `${host}: \u0441\u0430\u0439\u0442 \u043F\u043E\u0447\u0430\u0432 \u0432\u0456\u0434\u043F\u043E\u0432\u0456\u0434\u0430\u0442\u0438, \u0430\u043B\u0435 \u043D\u0435 \u0437\u0430\u0432\u0435\u0440\u0448\u0438\u0432 \u043F\u0435\u0440\u0435\u0434\u0430\u0447\u0443. \u0426\u0435 \u0437\u0431\u0456\u0439 \u0437'\u0454\u0434\u043D\u0430\u043D\u043D\u044F, \u0430 \u041D\u0415 \u0432\u0456\u0434\u0441\u0443\u0442\u043D\u0456\u0441\u0442\u044C \u0434\u043E\u043A\u0443\u043C\u0435\u043D\u0442\u0430.`,
+          "network"
+        );
+      }
       const seen = okCount[host] ?? 0;
       if (seen > 0) {
         throw new SourceError(
-          `${host}: \u0442\u0430\u0439\u043C-\u0430\u0443\u0442 \u0431\u0435\u0437 \u0432\u0456\u0434\u043F\u043E\u0432\u0456\u0434\u0456 \u043F\u0456\u0441\u043B\u044F ${seen} \u0443\u0441\u043F\u0456\u0448\u043D\u0438\u0445 \u0437\u0430\u043F\u0438\u0442\u0456\u0432. \u0426\u0435 \u043C'\u044F\u043A\u0438\u0439 rate limit \u2014 \u0437\u0430\u0447\u0435\u043A\u0430\u0439 \u043F\u0435\u0440\u0435\u0434 \u043F\u043E\u0432\u0442\u043E\u0440\u043D\u043E\u044E \u0441\u043F\u0440\u043E\u0431\u043E\u044E. \u0426\u0435 \u041D\u0415 \u043E\u0437\u043D\u0430\u0447\u0430\u0454, \u0449\u043E \u0434\u043E\u043A\u0443\u043C\u0435\u043D\u0442\u0430 \u043D\u0435 \u0456\u0441\u043D\u0443\u0454.`,
+          `${host}: \u0442\u0430\u0439\u043C-\u0430\u0443\u0442 \u0431\u0435\u0437 \u0432\u0456\u0434\u043F\u043E\u0432\u0456\u0434\u0456 \u043F\u0456\u0441\u043B\u044F ${seen} \u0443\u0441\u043F\u0456\u0448\u043D\u0438\u0445 \u0437\u0430\u043F\u0438\u0442\u0456\u0432. \u0421\u0445\u043E\u0436\u0435 \u043D\u0430 \u043C'\u044F\u043A\u0438\u0439 rate limit \u2014 \u0437\u0430\u0447\u0435\u043A\u0430\u0439 \u043F\u0435\u0440\u0435\u0434 \u043F\u043E\u0432\u0442\u043E\u0440\u043D\u043E\u044E \u0441\u043F\u0440\u043E\u0431\u043E\u044E. \u0426\u0435 \u041D\u0415 \u043E\u0437\u043D\u0430\u0447\u0430\u0454, \u0449\u043E \u0434\u043E\u043A\u0443\u043C\u0435\u043D\u0442\u0430 \u043D\u0435 \u0456\u0441\u043D\u0443\u0454.`,
           "cooldown"
         );
       }
       throw new SourceError(
-        `${host}: \u0442\u0430\u0439\u043C-\u0430\u0443\u0442 \u043D\u0430 \u043F\u0435\u0440\u0448\u043E\u043C\u0443 \u0436 \u0437\u0430\u043F\u0438\u0442\u0456, \u0431\u0435\u0437 \u0442\u0456\u043B\u0430 \u0432\u0456\u0434\u043F\u043E\u0432\u0456\u0434\u0456. \u0417\u0430\u0437\u0432\u0438\u0447\u0430\u0439 \u0446\u0435 \u043F\u0440\u043E\u0431\u043B\u0435\u043C\u0430 \u0456\u0437 \u0437\u0430\u0433\u043E\u043B\u043E\u0432\u043A\u0430\u043C\u0438 \u0437\u0430\u043F\u0438\u0442\u0443, \u0430 \u043D\u0435 \u0437\u0431\u0456\u0439 \u0441\u0430\u0439\u0442\u0443.`,
+        `${host}: \u043F\u0435\u0440\u0448\u0438\u0439 \u0437\u0430\u043F\u0438\u0442 \u0431\u0435\u0437 \u0436\u043E\u0434\u043D\u043E\u0457 \u0432\u0456\u0434\u043F\u043E\u0432\u0456\u0434\u0456. \u041F\u0440\u0438\u0447\u0438\u043D\u043E\u044E \u043C\u043E\u0436\u0435 \u0431\u0443\u0442\u0438 \u0437\u0431\u0456\u0439 \u0441\u0430\u0439\u0442\u0443 \u0447\u0438 \u043C\u0435\u0440\u0435\u0436\u0456 \u0430\u0431\u043E \u0437\u0430\u0433\u043E\u043B\u043E\u0432\u043A\u0438 \u0437\u0430\u043F\u0438\u0442\u0443. \u0426\u0435 \u041D\u0415 \u043E\u0437\u043D\u0430\u0447\u0430\u0454, \u0449\u043E \u0434\u043E\u043A\u0443\u043C\u0435\u043D\u0442\u0430 \u043D\u0435 \u0456\u0441\u043D\u0443\u0454.`,
         "headers"
       );
     }
@@ -36736,29 +36838,46 @@ function encodeNreg(nreg) {
 import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
-var ROOT = process.env.UA_LEGAL_CACHE_DIR ?? join(homedir(), ".cache", "ua-legal-sources");
+import { isAbsolute, join } from "node:path";
+function cacheRoot(env = process.env) {
+  const dir = env.UA_LEGAL_CACHE_DIR;
+  return dir && isAbsolute(dir) && !dir.includes("${") ? dir : join(homedir(), ".cache", "ua-legal-sources");
+}
+var ROOT = cacheRoot();
+var recent = /* @__PURE__ */ new Map();
+var RECENT_MAX = 4;
+function remember(key, value) {
+  recent.delete(key);
+  recent.set(key, value);
+  if (recent.size > RECENT_MAX) recent.delete(recent.keys().next().value);
+}
+function fresh(entry, maxAgeMs) {
+  if (maxAgeMs === void 0) return true;
+  const age = Date.now() - Date.parse(entry.fetchedAt);
+  return Number.isFinite(age) && age <= maxAgeMs;
+}
 function keyPath(key) {
   const h = createHash("sha256").update(key).digest("hex").slice(0, 32);
   return join(ROOT, `${h}.json`);
 }
 async function readCache(key, maxAgeMs) {
+  const mem2 = recent.get(key);
+  if (mem2) return fresh(mem2, maxAgeMs) ? mem2 : void 0;
   try {
     const raw = await readFile(keyPath(key), "utf8");
     const entry = JSON.parse(raw);
     if (typeof entry?.body !== "string" || typeof entry?.fetchedAt !== "string") {
       return void 0;
     }
-    if (maxAgeMs !== void 0) {
-      const age = Date.now() - Date.parse(entry.fetchedAt);
-      if (!Number.isFinite(age) || age > maxAgeMs) return void 0;
-    }
+    if (!fresh(entry, maxAgeMs)) return void 0;
+    remember(key, entry);
     return entry;
   } catch {
     return void 0;
   }
 }
 async function writeCache(key, value) {
+  remember(key, value);
   try {
     await mkdir(ROOT, { recursive: true });
     await writeFile(keyPath(key), JSON.stringify(value), "utf8");
@@ -36835,6 +36954,14 @@ function normalizeNreg(raw) {
   }
   return n;
 }
+function kyivToday(now2 = /* @__PURE__ */ new Date()) {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Europe/Kyiv",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).format(now2);
+}
 function isRealDate(iso) {
   const d = /* @__PURE__ */ new Date(`${iso}T00:00:00Z`);
   return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === iso;
@@ -36902,7 +37029,7 @@ async function getMeta(nreg) {
       "http"
     );
   }
-  const todayIso = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
+  const todayIso = kyivToday();
   const all = parseHistory(raw.history ?? "");
   const { past, future } = splitFuture(all, todayIso);
   const meta3 = {
@@ -36949,7 +37076,7 @@ async function getCard(nreg) {
   memSet(key, card);
   return card;
 }
-async function getText(nreg, edDate) {
+async function getText(nreg, edDate, currentRedaction) {
   nreg = normalizeNreg(nreg);
   const ed = edDate ? edDate.replace(/-/g, "") : "";
   if (ed && !/^\d{8}$/.test(ed)) {
@@ -36958,10 +37085,6 @@ async function getText(nreg, edDate) {
   const path = ed ? `/laws/show/${encodeNreg(nreg)}/ed${ed}.txt` : `/laws/show/${encodeNreg(nreg)}.txt`;
   const cacheKey = `text:${nreg}:${ed || "current"}`;
   const cached2 = await readCache(cacheKey);
-  const res = await request("data.rada", {
-    path,
-    ifModifiedSince: cached2?.lastModified
-  });
   const result = (body, retrievedAt, fromCache) => ({
     body,
     nreg,
@@ -36969,7 +37092,17 @@ async function getText(nreg, edDate) {
     retrievedAt,
     fromCache
   });
+  if (cached2 && (ed || currentRedaction && cached2.redaction === currentRedaction)) {
+    return result(cached2.body, cached2.fetchedAt, true);
+  }
+  const res = await request("data.rada", {
+    path,
+    ifModifiedSince: cached2?.lastModified
+  });
   if (cached2 && (res.notModified || res.status !== 200)) {
+    if (res.notModified && !ed && currentRedaction) {
+      await writeCache(cacheKey, { ...cached2, redaction: currentRedaction });
+    }
     return result(cached2.body, cached2.fetchedAt, true);
   }
   if (res.status !== 200) {
@@ -36982,7 +37115,8 @@ async function getText(nreg, edDate) {
   await writeCache(cacheKey, {
     body: res.body,
     lastModified: res.headers["last-modified"],
-    fetchedAt
+    fetchedAt,
+    ...ed ? {} : { redaction: currentRedaction }
   });
   return result(res.body, fetchedAt, false);
 }
@@ -37067,7 +37201,7 @@ function headingVariants(spec) {
   if (m[1] === "\u043A\u043D\u0438\u0433\u0430") return BOOK_ORDINALS[n - 1] ? [`\u043A\u043D\u0438\u0433\u0430 ${BOOK_ORDINALS[n - 1]}`] : [];
   return n > 0 ? [`\u0440\u043E\u0437\u0434\u0456\u043B ${toRoman(n)}`] : [];
 }
-function buildIndex(text) {
+function buildIndex(text, refDate = kyivToday()) {
   const lines = text.replace(/\r\n?/g, "\n").split("\n");
   const articles = /* @__PURE__ */ new Map();
   const structural = [];
@@ -37088,7 +37222,7 @@ function buildIndex(text) {
       structural.push({ label: raw.trim(), line: i });
     }
   });
-  return { articles, structural, excluded, lines };
+  return { articles, structural, excluded, lines, refDate };
 }
 function splitMarkers(text) {
   const markers = [];
@@ -37126,6 +37260,8 @@ function normNum(n) {
 }
 function sliceUnit(index, unit) {
   const spec = plainDashes(unit).trim();
+  const part = partAddress(spec);
+  if (part) return slicePart(index, part);
   const point = POINT.exec(spec);
   if (point) return slicePoint(index, spec, point);
   const artMatch = /^(?:ст\.?|стаття|st)?\s*(\d+(?:-\d+)?)$/i.exec(spec);
@@ -37183,13 +37319,59 @@ function sliceUnit(index, unit) {
     ambiguityReason: starts.length > 1 ? "repeated" : void 0
   };
 }
+function partAddress(spec) {
+  const s = spec.toLowerCase().replace(/\s+/g, " ").trim();
+  const art = /(?:^|[\s,])(?:ст\.?|статт[яі])\s*(\d+(?:-\d+)?)(?=$|[\s,])/u.exec(s);
+  const prt = /(?:^|[\s,])(?:ч\.?|частин[аи])\s*(\d+(?:-\d+)?)(?=$|[\s,])/u.exec(s);
+  if (!art || !prt) return void 0;
+  const pnt = /(?:^|[\s,])(?:п\.?|пункт)\s*(\d+(?:-\d+)?)(?=$|[\s,])/u.exec(s);
+  const rest = [art, prt, pnt].reduce((acc, m) => m ? acc.replace(m[0], " ") : acc, s);
+  if (rest.replace(/[\s,]/g, "")) return void 0;
+  return { article: art[1], part: prt[1], point: pnt?.[1] };
+}
+function slicePart(index, addr) {
+  const whole = sliceUnit(index, addr.article);
+  if (!whole.found) return whole;
+  const label = `${addr.point ? `\u043F. ${addr.point} ` : ""}\u0447. ${addr.part} \u0441\u0442. ${addr.article}`;
+  const narrow = (text, startRe, nextRe) => {
+    const lines = text.split("\n");
+    const from = lines.findIndex((l) => startRe.test(l));
+    if (from < 0) return void 0;
+    let to = lines.length;
+    for (let k = from + 1; k < lines.length; k++) {
+      if (nextRe.test(lines[k])) {
+        to = k;
+        break;
+      }
+    }
+    return lines.slice(from, to).join("\n").trim();
+  };
+  const esc2 = (n) => n.replace(/-/g, "-?");
+  return {
+    ...whole,
+    unit: label,
+    occurrences: whole.occurrences.map((o) => {
+      const partText = narrow(o.text, new RegExp(`^${esc2(addr.part)}\\.\\s`), /^\d+(?:-\d+)?\.\s/);
+      const pointText = partText && addr.point ? narrow(partText, new RegExp(`^${esc2(addr.point)}\\)\\s`), /^\d+(?:-\d+)?\)\s/) : void 0;
+      const narrowed = pointText ?? partText;
+      if (!narrowed || addr.point && !pointText) {
+        return { ...o, partNote: `${label}: \u0442\u0430\u043A\u043E\u0457 \u0447\u0430\u0441\u0442\u0438\u043D\u0438 \u0447\u0438 \u043F\u0443\u043D\u043A\u0442\u0443 \u0432 \u0442\u0435\u043A\u0441\u0442\u0456 \u043D\u0435 \u0437\u043D\u0430\u0439\u0434\u0435\u043D\u043E \u2014 \u043F\u043E\u043A\u0430\u0437\u0430\u043D\u043E \u0432\u0441\u044E \u0441\u0442\u0430\u0442\u0442\u044E.` };
+      }
+      return { ...o, text: `${o.heading}
+${narrowed}`, partNote: `\u041F\u043E\u043A\u0430\u0437\u0430\u043D\u043E \u043B\u0438\u0448\u0435 ${label}; \u043F\u043E\u0432\u043D\u0438\u0439 \u0442\u0435\u043A\u0441\u0442 \u2014 unit \xAB${addr.article}\xBB.` };
+    })
+  };
+}
 function findHeadings(index, spec) {
   const needle = normHeading(spec);
   const byHeading = (wanted) => index.structural.filter((s) => wanted.includes(normHeading(s.label)));
   let pool = byHeading([needle]);
   if (pool.length === 0) pool = byHeading(headingVariants(needle));
   if (pool.length === 0) {
-    pool = index.structural.filter((s) => normHeading(s.label).startsWith(needle));
+    pool = index.structural.filter((s) => {
+      const label = normHeading(s.label);
+      return label.startsWith(needle) && !/[\p{L}\p{N}]/u.test(label.charAt(needle.length));
+    });
   }
   if (pool.length === 0 && FINAL_WORDS.test(needle)) {
     pool = index.structural.filter((s) => FINAL_PROVISIONS.test(plainDashes(s.label)));
@@ -37302,10 +37484,60 @@ function extractAt(index, start, articleNum, sharing = 1) {
   const { raw: _raw, ...rest } = occ;
   return rest;
 }
+var STRUCK = /\/\*([\s\S]*?)\*\//g;
+var KSU_DATE = /Конституційного\s+Суду[^{}]*?від\s+(\d{2})\.(\d{2})\.(\d{4})/u;
+var DELAYED = /[ув]трачає\s+чинність\s+через\s+(\S+)\s+місяц/u;
+var AT_ONCE = /[ув]трачає\s+чинність\s+(?:з|із|зі)\s+дня\s+ухвалення/u;
+var PARTIAL = /в\s+тім,\s+що|а\s+саме|^\{\s*Положення\s/u;
+var MONTH_WORDS = {
+  "\u043E\u0434\u0438\u043D": 1,
+  "\u043E\u0434\u043D\u043E\u0433\u043E": 1,
+  "\u0434\u0432\u0430": 2,
+  "\u0434\u0432\u043E\u0445": 2,
+  "\u0442\u0440\u0438": 3,
+  "\u0442\u0440\u044C\u043E\u0445": 3,
+  "\u0447\u043E\u0442\u0438\u0440\u0438": 4,
+  "\u0447\u043E\u0442\u0438\u0440\u044C\u043E\u0445": 4,
+  "\u043F'\u044F\u0442\u044C": 5,
+  "\u043F'\u044F\u0442\u0438": 5,
+  "\u0448\u0456\u0441\u0442\u044C": 6,
+  "\u0448\u0435\u0441\u0442\u0438": 6,
+  "\u0434\u0435\u0432'\u044F\u0442\u044C": 9,
+  "\u0434\u0435\u0432'\u044F\u0442\u0438": 9,
+  "\u0434\u0432\u0430\u043D\u0430\u0434\u0446\u044F\u0442\u044C": 12,
+  "\u0434\u0432\u0430\u043D\u0430\u0434\u0446\u044F\u0442\u0438": 12
+};
+function addMonths(iso, months) {
+  const [y, m, d] = iso.split("-").map(Number);
+  return new Date(Date.UTC(y, m - 1 + months, d)).toISOString().slice(0, 10);
+}
+function strikeDown(raw, refDate) {
+  const items2 = [];
+  const text = raw.replace(STRUCK, (_, inner) => {
+    const marker = (/\{[^{}]*\}/.exec(inner)?.[0] ?? "").replace(APOSTROPHES, "'");
+    const words = inner.replace(/\{[^{}]*\}/g, " ").replace(/\s+/g, " ").trim();
+    const decided = KSU_DATE.exec(marker);
+    const decidedOn = decided ? `${decided[3]}-${decided[2]}-${decided[1]}` : null;
+    const delay = DELAYED.exec(marker);
+    const months = delay ? MONTH_WORDS[delay[1]] ?? (Number(delay[1]) || void 0) : void 0;
+    const lostForceOn = !decidedOn ? null : months ? addMonths(decidedOn, months) : AT_ONCE.test(marker) ? decidedOn : null;
+    const partial2 = PARTIAL.test(marker);
+    const inForce = lostForceOn ? refDate < lostForceOn : null;
+    items2.push({ text: words.slice(0, 300), marker, lostForceOn, partial: partial2, inForce });
+    if (inForce === false && !partial2) {
+      const lead = /^\d+(?:-\d+)?\.\s/.exec(words)?.[0] ?? "";
+      const [y, m, d] = lostForceOn.split("-");
+      return `${lead}[\u0432\u0438\u0437\u043D\u0430\u043D\u043E \u043D\u0435\u043A\u043E\u043D\u0441\u0442\u0438\u0442\u0443\u0446\u0456\u0439\u043D\u0438\u043C, \u043D\u0435 \u0434\u0456\u0454 \u0437 ${d}.${m}.${y} \u2014 \u0434\u0438\u0432. unconstitutional]`;
+    }
+    return inner;
+  });
+  return { text, items: items2 };
+}
 function sliceRange(index, start, end, sharing = 1) {
   const { lines } = index;
   const rawText = lines.slice(start, end).join("\n").trim();
-  const split = splitMarkers(rawText);
+  const struck = strikeDown(rawText, index.refDate);
+  const split = splitMarkers(struck.text);
   const budget = Math.floor(MAX_UNIT_CHARS / sharing);
   const truncated = split.clean.length > budget;
   const clean = truncated ? split.clean.slice(0, budget) : split.clean;
@@ -37324,7 +37556,8 @@ function sliceRange(index, start, end, sharing = 1) {
     charCount: rawText.length,
     context,
     raw: rawText,
-    ...truncated ? { truncated } : {}
+    ...truncated ? { truncated } : {},
+    ...struck.items.length ? { unconstitutional: struck.items } : {}
   };
 }
 function listUnits(index, filter) {
@@ -37478,7 +37711,8 @@ async function call(path, body) {
   if (res.status !== 200) {
     throw new SourceError(
       `\u041B\u041F\u0414: HTTP ${res.status} \u043D\u0430 ${path}. \u041F\u0440\u0430\u043A\u0442\u0438\u043A\u0443 \u041D\u0415 \u043F\u0435\u0440\u0435\u0432\u0456\u0440\u0435\u043D\u043E \u2014 \u043D\u0435 \u0432\u0456\u0434\u043F\u043E\u0432\u0456\u0434\u0430\u0439 \u0437 \u043F\u0430\u043C'\u044F\u0442\u0456.`,
-      "http"
+      "http",
+      res.status
     );
   }
   try {
@@ -37496,11 +37730,17 @@ function mentionsQuery(text, stems) {
   return stems.some((stem) => t.includes(stem));
 }
 async function searchPositions(query, semantic = false) {
-  const payload = await call("/search/text", {
-    query,
-    aiEnabled: semantic,
-    comment: null
-  });
+  let payload;
+  let fallbackNote = "";
+  try {
+    payload = await call("/search/text", { query, aiEnabled: semantic, comment: null });
+  } catch (err) {
+    const serverError = err instanceof SourceError && (err.status ?? 0) >= 500;
+    if (!semantic || !serverError) throw err;
+    payload = await call("/search/text", { query, aiEnabled: false, comment: null });
+    semantic = false;
+    fallbackNote = `\u0421\u0435\u043C\u0430\u043D\u0442\u0438\u0447\u043D\u0438\u0439 \u043F\u043E\u0448\u0443\u043A \u041B\u041F\u0414 \u043D\u0435 \u0432\u0456\u0434\u043F\u043E\u0432\u0456\u0432 (HTTP ${err.status}), \u0442\u043E\u043C\u0443 \u043F\u043E\u043A\u0430\u0437\u0430\u043D\u043E \u0437\u0432\u0438\u0447\u0430\u0439\u043D\u0438\u0439 \u043F\u043E\u0448\u0443\u043A \u0442\u0438\u0445 \u0441\u0430\u043C\u0438\u0445 \u0441\u043B\u0456\u0432. `;
+  }
   const raw = items(payload);
   const stems = semantic ? [] : queryStems(query);
   const positions = raw.filter((it) => it && typeof it === "object").map((it) => {
@@ -37526,13 +37766,13 @@ async function searchPositions(query, semantic = false) {
     return {
       positions: [],
       semantic,
-      note: "\u0416\u043E\u0434\u043D\u0430 \u0437 \u043F\u043E\u0437\u0438\u0446\u0456\u0439, \u044F\u043A\u0456 \u043F\u043E\u0432\u0435\u0440\u043D\u0443\u043B\u0430 \u041B\u041F\u0414, \u043D\u0435 \u043C\u0456\u0441\u0442\u0438\u0442\u044C \u0441\u043B\u0456\u0432 \u0437\u0430\u043F\u0438\u0442\u0443 \u2014 \u0446\u0435 \u043D\u0435 \u0440\u0435\u0437\u0443\u043B\u044C\u0442\u0430\u0442\u0438 \u043F\u043E\u0448\u0443\u043A\u0443, \u0430 \u0434\u043E\u0431\u0456\u0440\u043A\u0430, \u044F\u043A\u0443 \u0431\u0430\u0437\u0430 \u0432\u0456\u0434\u0434\u0430\u0454, \u043A\u043E\u043B\u0438 \u043D\u0456\u0447\u043E\u0433\u043E \u043D\u0435 \u0437\u043D\u0430\u0439\u0448\u043B\u0430. \u0421\u043F\u0440\u043E\u0431\u0443\u0439 \u0456\u043D\u0448\u0435 \u0444\u043E\u0440\u043C\u0443\u043B\u044E\u0432\u0430\u043D\u043D\u044F \u0430\u0431\u043E semantic=true. \u0426\u0435 \u041D\u0415 \xAB\u043F\u0440\u0430\u043A\u0442\u0438\u043A\u0438 \u043D\u0435\u043C\u0430\u0454\xBB."
+      note: fallbackNote + "\u0416\u043E\u0434\u043D\u0430 \u0437 \u043F\u043E\u0437\u0438\u0446\u0456\u0439, \u044F\u043A\u0456 \u043F\u043E\u0432\u0435\u0440\u043D\u0443\u043B\u0430 \u041B\u041F\u0414, \u043D\u0435 \u043C\u0456\u0441\u0442\u0438\u0442\u044C \u0441\u043B\u0456\u0432 \u0437\u0430\u043F\u0438\u0442\u0443 \u2014 \u0446\u0435 \u043D\u0435 \u0440\u0435\u0437\u0443\u043B\u044C\u0442\u0430\u0442\u0438 \u043F\u043E\u0448\u0443\u043A\u0443, \u0430 \u0434\u043E\u0431\u0456\u0440\u043A\u0430, \u044F\u043A\u0443 \u0431\u0430\u0437\u0430 \u0432\u0456\u0434\u0434\u0430\u0454, \u043A\u043E\u043B\u0438 \u043D\u0456\u0447\u043E\u0433\u043E \u043D\u0435 \u0437\u043D\u0430\u0439\u0448\u043B\u0430. \u0421\u043F\u0440\u043E\u0431\u0443\u0439 \u0456\u043D\u0448\u0435 \u0444\u043E\u0440\u043C\u0443\u043B\u044E\u0432\u0430\u043D\u043D\u044F \u0430\u0431\u043E semantic=true. \u0426\u0435 \u041D\u0415 \xAB\u043F\u0440\u0430\u043A\u0442\u0438\u043A\u0438 \u043D\u0435\u043C\u0430\u0454\xBB."
     };
   }
   return {
     positions,
     semantic,
-    note: positions.length === 0 ? "0 \u043F\u043E\u0437\u0438\u0446\u0456\u0439. \u0426\u0435 \u041D\u0415 \xAB\u043F\u0440\u0430\u043A\u0442\u0438\u043A\u0438 \u043D\u0435\u043C\u0430\u0454\xBB \u2014 \u0441\u043F\u0440\u043E\u0431\u0443\u0439 \u0456\u043D\u0448\u0435 \u0444\u043E\u0440\u043C\u0443\u043B\u044E\u0432\u0430\u043D\u043D\u044F, \u0441\u0435\u043C\u0430\u043D\u0442\u0438\u0447\u043D\u0438\u0439 \u043F\u043E\u0448\u0443\u043A (semantic=true), \u0434\u0430\u0439\u0434\u0436\u0435\u0441\u0442\u0438 \u0412\u0421 \u0456 \u0404\u0414\u0420\u0421\u0420." : (semantic ? "\u0421\u0435\u043C\u0430\u043D\u0442\u0438\u0447\u043D\u0438\u0439 \u043F\u043E\u0448\u0443\u043A \u043F\u043E\u0432\u0435\u0440\u0442\u0430\u0454 \u043D\u0430\u0439\u0431\u043B\u0438\u0436\u0447\u0435 \u0437\u0430 \u0437\u043C\u0456\u0441\u0442\u043E\u043C \u0437\u0430\u0432\u0436\u0434\u0438, \u043D\u0430\u0432\u0456\u0442\u044C \u043A\u043E\u043B\u0438 \u0442\u043E\u0447\u043D\u043E\u0433\u043E \u0437\u0431\u0456\u0433\u0443 \u043D\u0435\u043C\u0430\u0454 \u2014 \u043F\u0435\u0440\u0435\u0432\u0456\u0440, \u0449\u043E \u043A\u043E\u0436\u043D\u0430 \u043F\u043E\u0437\u0438\u0446\u0456\u044F \u0441\u043F\u0440\u0430\u0432\u0434\u0456 \u043F\u0440\u043E \u0442\u0432\u043E\u0454 \u043F\u0438\u0442\u0430\u043D\u043D\u044F. " : "") + "\u0426\u0435 \u0444\u0440\u0430\u0433\u043C\u0435\u043D\u0442\u0438 \u0434\u043B\u044F \u0432\u0456\u0434\u0431\u043E\u0440\u0443 \u2014 \u043F\u043E\u0432\u043D\u0438\u0439 \u0442\u0435\u043A\u0441\u0442 \u043F\u043E\u0437\u0438\u0446\u0456\u0457 \u0434\u0430\u0454 lpd_position. \u0426\u0438\u0442\u0443\u0439 \u041F\u041E\u0421\u0422\u0410\u041D\u041E\u0412\u0423, \u0434\u043E \u044F\u043A\u043E\u0457 \u043F\u0440\u0438\u0432'\u044F\u0437\u0430\u043D\u0430 \u043F\u043E\u0437\u0438\u0446\u0456\u044F, \u0430 \u043D\u0435 \u0441\u0430\u043C\u0443 \u041B\u041F\u0414. \u041F\u0435\u0440\u0435\u0432\u0456\u0440, \u0447\u0438 \u043D\u0435 \u0431\u0443\u043B\u043E \u0432\u0456\u0434\u0441\u0442\u0443\u043F\u0443 \u0432\u0456\u0434 \u0446\u0456\u0454\u0457 \u043F\u043E\u0437\u0438\u0446\u0456\u0457."
+    note: fallbackNote + (positions.length === 0 ? "0 \u043F\u043E\u0437\u0438\u0446\u0456\u0439. \u0426\u0435 \u041D\u0415 \xAB\u043F\u0440\u0430\u043A\u0442\u0438\u043A\u0438 \u043D\u0435\u043C\u0430\u0454\xBB \u2014 \u0441\u043F\u0440\u043E\u0431\u0443\u0439 \u0456\u043D\u0448\u0435 \u0444\u043E\u0440\u043C\u0443\u043B\u044E\u0432\u0430\u043D\u043D\u044F, \u0441\u0435\u043C\u0430\u043D\u0442\u0438\u0447\u043D\u0438\u0439 \u043F\u043E\u0448\u0443\u043A (semantic=true), \u0434\u0430\u0439\u0434\u0436\u0435\u0441\u0442\u0438 \u0412\u0421 \u0456 \u0404\u0414\u0420\u0421\u0420." : (semantic ? "\u0421\u0435\u043C\u0430\u043D\u0442\u0438\u0447\u043D\u0438\u0439 \u043F\u043E\u0448\u0443\u043A \u043F\u043E\u0432\u0435\u0440\u0442\u0430\u0454 \u043D\u0430\u0439\u0431\u043B\u0438\u0436\u0447\u0435 \u0437\u0430 \u0437\u043C\u0456\u0441\u0442\u043E\u043C \u0437\u0430\u0432\u0436\u0434\u0438, \u043D\u0430\u0432\u0456\u0442\u044C \u043A\u043E\u043B\u0438 \u0442\u043E\u0447\u043D\u043E\u0433\u043E \u0437\u0431\u0456\u0433\u0443 \u043D\u0435\u043C\u0430\u0454 \u2014 \u043F\u0435\u0440\u0435\u0432\u0456\u0440, \u0449\u043E \u043A\u043E\u0436\u043D\u0430 \u043F\u043E\u0437\u0438\u0446\u0456\u044F \u0441\u043F\u0440\u0430\u0432\u0434\u0456 \u043F\u0440\u043E \u0442\u0432\u043E\u0454 \u043F\u0438\u0442\u0430\u043D\u043D\u044F. " : "") + "\u0426\u0435 \u0444\u0440\u0430\u0433\u043C\u0435\u043D\u0442\u0438 \u0434\u043B\u044F \u0432\u0456\u0434\u0431\u043E\u0440\u0443 \u2014 \u043F\u043E\u0432\u043D\u0438\u0439 \u0442\u0435\u043A\u0441\u0442 \u043F\u043E\u0437\u0438\u0446\u0456\u0457 \u0434\u0430\u0454 lpd_position. \u0426\u0438\u0442\u0443\u0439 \u041F\u041E\u0421\u0422\u0410\u041D\u041E\u0412\u0423, \u0434\u043E \u044F\u043A\u043E\u0457 \u043F\u0440\u0438\u0432'\u044F\u0437\u0430\u043D\u0430 \u043F\u043E\u0437\u0438\u0446\u0456\u044F, \u0430 \u043D\u0435 \u0441\u0430\u043C\u0443 \u041B\u041F\u0414. \u041F\u0435\u0440\u0435\u0432\u0456\u0440, \u0447\u0438 \u043D\u0435 \u0431\u0443\u043B\u043E \u0432\u0456\u0434\u0441\u0442\u0443\u043F\u0443 \u0432\u0456\u0434 \u0446\u0456\u0454\u0457 \u043F\u043E\u0437\u0438\u0446\u0456\u0457.")
   };
 }
 async function position(id) {
@@ -37641,11 +37881,18 @@ function filterByCase(rows, caseNumber) {
   );
   return { rows: kept, substringOnly: kept.length === 0 && rows.length > 0 };
 }
+function isErdr(value) {
+  return /^\d{17}$/.test((value ?? "").replace(/\s/g, ""));
+}
 async function search(input2) {
   resetBudget();
+  const erdr = isErdr(input2.caseNumber);
+  const expression = erdr ? [input2.expression, input2.caseNumber.replace(/\s/g, "")].filter(Boolean).join(" ") : input2.expression;
+  const caseNumber = erdr ? void 0 : input2.caseNumber;
+  const erdrNote = erdr ? "\u041D\u043E\u043C\u0435\u0440 \u0404\u0420\u0414\u0420 \u0448\u0443\u043A\u0430\u043D\u043E \u044F\u043A \u0442\u0435\u043A\u0441\u0442 \u0437\u0430\u043F\u0438\u0442\u0443: \u043F\u043E\u043B\u0435 \u043D\u043E\u043C\u0435\u0440\u0430 \u0441\u043F\u0440\u0430\u0432\u0438 \u043F\u0440\u0438\u0439\u043C\u0430\u0454 \u043B\u0438\u0448\u0435 \u0404\u0423\u041D \u0441\u0443\u0434\u0443. " : "";
   const form = {
-    SearchExpression: stripAngles(input2.expression),
-    CaseNumber: stripAngles(input2.caseNumber),
+    SearchExpression: stripAngles(expression),
+    CaseNumber: stripAngles(caseNumber),
     RegNumber: stripAngles(input2.regNumber),
     ChairmenName: stripAngles(input2.judge),
     UserCourtCode: stripAngles(input2.courtCode),
@@ -37666,18 +37913,18 @@ async function search(input2) {
       note: `HTTP ${res.status}. \u041F\u043E\u0448\u0443\u043A \u041D\u0415 \u0432\u0438\u043A\u043E\u043D\u0430\u043D\u043E \u2014 \u043D\u0435 \u0440\u043E\u0431\u0438 \u0437 \u0446\u044C\u043E\u0433\u043E \u0432\u0438\u0441\u043D\u043E\u0432\u043A\u0443, \u0449\u043E \u0441\u043F\u0440\u0430\u0432\u0438 \u0430\u0431\u043E \u043F\u0440\u0430\u043A\u0442\u0438\u043A\u0438 \u043D\u0435 \u0456\u0441\u043D\u0443\u0454.`
     };
   }
-  if (BLOCK.test(res.body)) {
-    return {
-      status: "blocked",
-      found: null,
-      countCapped: false,
-      rows: [],
-      note: "\u0421\u0422\u041E\u041F: \u0440\u0435\u0454\u0441\u0442\u0440 \u043F\u043E\u043A\u0430\u0437\u0430\u0432 \u0431\u043B\u043E\u043A-\u0441\u0442\u043E\u0440\u0456\u043D\u043A\u0443. \u041E\u0431\u0445\u0456\u0434 \u043D\u0435 \u0432\u0438\u043A\u043E\u043D\u0443\u0454\u0442\u044C\u0441\u044F. \u041F\u043E\u0432\u0456\u0434\u043E\u043C \u043A\u043E\u0440\u0438\u0441\u0442\u0443\u0432\u0430\u0447\u0430 \u0456 \u0441\u043F\u0440\u043E\u0431\u0443\u0439 \u043F\u0456\u0437\u043D\u0456\u0448\u0435."
-    };
-  }
   const found = parseFound(res.body);
   const rows = parseRows(res.body);
   if (found === null && rows.length === 0) {
+    if (BLOCK.test(res.body)) {
+      return {
+        status: "blocked",
+        found: null,
+        countCapped: false,
+        rows: [],
+        note: "\u0421\u0422\u041E\u041F: \u0440\u0435\u0454\u0441\u0442\u0440 \u043F\u043E\u043A\u0430\u0437\u0430\u0432 \u0431\u043B\u043E\u043A-\u0441\u0442\u043E\u0440\u0456\u043D\u043A\u0443. \u041E\u0431\u0445\u0456\u0434 \u043D\u0435 \u0432\u0438\u043A\u043E\u043D\u0443\u0454\u0442\u044C\u0441\u044F. \u041F\u043E\u0432\u0456\u0434\u043E\u043C \u043A\u043E\u0440\u0438\u0441\u0442\u0443\u0432\u0430\u0447\u0430 \u0456 \u0441\u043F\u0440\u043E\u0431\u0443\u0439 \u043F\u0456\u0437\u043D\u0456\u0448\u0435."
+      };
+    }
     return {
       status: "no_results_view",
       found: null,
@@ -37686,14 +37933,14 @@ async function search(input2) {
       note: "\u0421\u0442\u043E\u0440\u0456\u043D\u043A\u0430 \u0440\u0435\u0437\u0443\u043B\u044C\u0442\u0430\u0442\u0456\u0432 \u043D\u0435 \u0432\u0456\u0434\u0440\u0435\u043D\u0434\u0435\u0440\u0438\u043B\u0430\u0441\u044C (\u043D\u0456 \u043B\u0456\u0447\u0438\u043B\u044C\u043D\u0438\u043A\u0430, \u043D\u0456 \u0440\u044F\u0434\u043A\u0456\u0432). \u0426\u0435 \u041D\u0415 \xAB\u043D\u0456\u0447\u043E\u0433\u043E \u043D\u0435 \u0437\u043D\u0430\u0439\u0434\u0435\u043D\u043E\xBB, \u0430 \u0437\u043B\u0430\u043C\u0430\u043D\u0438\u0439 \u0437\u0430\u043F\u0438\u0442 \u0430\u0431\u043E \u043C'\u044F\u043A\u0438\u0439 \u0431\u043B\u043E\u043A. \u041D\u0435 \u0440\u043E\u0431\u0438 \u0432\u0438\u0441\u043D\u043E\u0432\u043A\u0443 \u043F\u0440\u043E \u0432\u0456\u0434\u0441\u0443\u0442\u043D\u0456\u0441\u0442\u044C \u0441\u043F\u0440\u0430\u0432\u0438."
     };
   }
-  const { rows: filtered, substringOnly } = filterByCase(rows, input2.caseNumber);
+  const { rows: filtered, substringOnly } = filterByCase(rows, caseNumber);
   if (filtered.length === 0) {
     return {
       status: "zero",
       found,
       countCapped: found === 1e5,
       rows: [],
-      note: (substringOnly ? `\u0420\u0435\u0454\u0441\u0442\u0440 \u043F\u043E\u0432\u0435\u0440\u043D\u0443\u0432 ${rows.length} \u0440\u044F\u0434\u043A\u0456\u0432, \u0430\u043B\u0435 \u0436\u043E\u0434\u0435\u043D \u043D\u0435 \u043D\u0430\u043B\u0435\u0436\u0438\u0442\u044C \u0441\u043F\u0440\u0430\u0432\u0456 ${input2.caseNumber} \u2014 \u043F\u043E\u0448\u0443\u043A \u0437\u0430 \u043D\u043E\u043C\u0435\u0440\u043E\u043C \u0441\u043F\u0440\u0430\u0432\u0438 \u043F\u0440\u0430\u0446\u044E\u0454 \u044F\u043A \u043F\u043E\u0448\u0443\u043A \u043F\u0456\u0434\u0440\u044F\u0434\u043A\u0430. \u0414\u043B\u044F \u0446\u0456\u0454\u0457 \u0441\u043F\u0440\u0430\u0432\u0438 \u0440\u0435\u0437\u0443\u043B\u044C\u0442\u0430\u0442 \u043D\u0443\u043B\u044C\u043E\u0432\u0438\u0439. ` : "") + "\u041D\u0423\u041B\u042C \u0440\u044F\u0434\u043A\u0456\u0432. \u0426\u0435 \xAB\u044F \u043D\u0435 \u0437\u043D\u0430\u0439\u0448\u043E\u0432\xBB, \u0430 \u043D\u0435 \xAB\u043F\u0440\u0430\u043A\u0442\u0438\u043A\u0438/\u0441\u043F\u0440\u0430\u0432\u0438 \u043D\u0435\u043C\u0430\u0454\xBB. \u041F\u0435\u0440\u0435\u0432\u0456\u0440: \u0432\u0456\u0434\u043C\u0456\u043D\u043E\u043A (\u0434\u043E\u0434\u0430\u0439 `*` \u0434\u043B\u044F \u043C\u043E\u0440\u0444\u043E\u043B\u043E\u0433\u0456\u0457), \u0441\u0442\u043E\u043F-\u0441\u043B\u043E\u0432\u0430 (\u041E\u0421\u041E\u0411\u0410, \u0410\u0414\u0420\u0415\u0421\u0410, \u0433\u0440\u043D), \u043B\u0456\u0442\u0435\u0440\u043D\u0438\u0439 \u0441\u0443\u0444\u0456\u043A\u0441 \u0443 \u043D\u043E\u043C\u0435\u0440\u0456 \u0441\u043F\u0440\u0430\u0432\u0438, \u0404\u0420\u0414\u0420 \u0443 \u043F\u043E\u043B\u0456 \u043D\u043E\u043C\u0435\u0440\u0430 \u0441\u043F\u0440\u0430\u0432\u0438 \u0434\u043B\u044F \u043A\u0440\u0438\u043C\u0456\u043D\u0430\u043B\u044C\u043D\u0438\u0445 \u043F\u0440\u043E\u0432\u0430\u0434\u0436\u0435\u043D\u044C."
+      note: erdrNote + (substringOnly ? `\u0420\u0435\u0454\u0441\u0442\u0440 \u043F\u043E\u0432\u0435\u0440\u043D\u0443\u0432 ${rows.length} \u0440\u044F\u0434\u043A\u0456\u0432, \u0430\u043B\u0435 \u0436\u043E\u0434\u0435\u043D \u043D\u0435 \u043D\u0430\u043B\u0435\u0436\u0438\u0442\u044C \u0441\u043F\u0440\u0430\u0432\u0456 ${caseNumber} \u2014 \u043F\u043E\u0448\u0443\u043A \u0437\u0430 \u043D\u043E\u043C\u0435\u0440\u043E\u043C \u0441\u043F\u0440\u0430\u0432\u0438 \u043F\u0440\u0430\u0446\u044E\u0454 \u044F\u043A \u043F\u043E\u0448\u0443\u043A \u043F\u0456\u0434\u0440\u044F\u0434\u043A\u0430. \u0414\u043B\u044F \u0446\u0456\u0454\u0457 \u0441\u043F\u0440\u0430\u0432\u0438 \u0440\u0435\u0437\u0443\u043B\u044C\u0442\u0430\u0442 \u043D\u0443\u043B\u044C\u043E\u0432\u0438\u0439. ` : "") + "\u041D\u0423\u041B\u042C \u0440\u044F\u0434\u043A\u0456\u0432. \u0426\u0435 \xAB\u044F \u043D\u0435 \u0437\u043D\u0430\u0439\u0448\u043E\u0432\xBB, \u0430 \u043D\u0435 \xAB\u043F\u0440\u0430\u043A\u0442\u0438\u043A\u0438/\u0441\u043F\u0440\u0430\u0432\u0438 \u043D\u0435\u043C\u0430\u0454\xBB. \u041F\u0435\u0440\u0435\u0432\u0456\u0440: \u0432\u0456\u0434\u043C\u0456\u043D\u043E\u043A (\u0434\u043E\u0434\u0430\u0439 `*` \u0434\u043B\u044F \u043C\u043E\u0440\u0444\u043E\u043B\u043E\u0433\u0456\u0457), \u0441\u0442\u043E\u043F-\u0441\u043B\u043E\u0432\u0430 (\u041E\u0421\u041E\u0411\u0410, \u0410\u0414\u0420\u0415\u0421\u0410, \u0433\u0440\u043D), \u043B\u0456\u0442\u0435\u0440\u043D\u0438\u0439 \u0441\u0443\u0444\u0456\u043A\u0441 \u0443 \u043D\u043E\u043C\u0435\u0440\u0456 \u0441\u043F\u0440\u0430\u0432\u0438. \u041D\u043E\u043C\u0435\u0440 \u0404\u0420\u0414\u0420 \u0448\u0443\u043A\u0430\u0454\u0442\u044C\u0441\u044F \u044F\u043A \u0442\u0435\u043A\u0441\u0442 \u0437\u0430\u043F\u0438\u0442\u0443 (expression), \u043D\u0435 \u044F\u043A \u043D\u043E\u043C\u0435\u0440 \u0441\u043F\u0440\u0430\u0432\u0438."
     };
   }
   return {
@@ -37701,7 +37948,7 @@ async function search(input2) {
     found,
     countCapped: found === 1e5,
     rows: filtered,
-    note: "\u041F\u043E\u0441\u0438\u043B\u0430\u043D\u043D\u044F \u043B\u0438\u0448\u0435 \u044F\u043A https://reyestr.court.gov.ua/Review/<id> \u2014 URL \u043F\u043E\u0448\u0443\u043A\u0443 \u043D\u0435 \u0456\u0441\u043D\u0443\u0454, \u043F\u043E\u0448\u0443\u043A \u043F\u0440\u0430\u0446\u044E\u0454 \u0442\u0456\u043B\u044C\u043A\u0438 \u0447\u0435\u0440\u0435\u0437 POST. \u041F\u0440\u043E\u0446\u0435\u0441\u0443\u0430\u043B\u044C\u043D\u043E\u0433\u043E \u0441\u0442\u0430\u043D\u0443 (\u0447\u0438 \u043D\u0430\u0431\u0440\u0430\u043B\u043E \u0440\u0456\u0448\u0435\u043D\u043D\u044F \u0441\u0438\u043B\u0438) \u0432 \u0404\u0414\u0420\u0421\u0420 \u041D\u0415\u041C\u0410\u0404 \u2014 \u0446\u0435 court.gov.ua/fair."
+    note: erdrNote + "\u041F\u043E\u0441\u0438\u043B\u0430\u043D\u043D\u044F \u043B\u0438\u0448\u0435 \u044F\u043A https://reyestr.court.gov.ua/Review/<id> \u2014 URL \u043F\u043E\u0448\u0443\u043A\u0443 \u043D\u0435 \u0456\u0441\u043D\u0443\u0454, \u043F\u043E\u0448\u0443\u043A \u043F\u0440\u0430\u0446\u044E\u0454 \u0442\u0456\u043B\u044C\u043A\u0438 \u0447\u0435\u0440\u0435\u0437 POST. \u041F\u0440\u043E\u0446\u0435\u0441\u0443\u0430\u043B\u044C\u043D\u043E\u0433\u043E \u0441\u0442\u0430\u043D\u0443 (\u0447\u0438 \u043D\u0430\u0431\u0440\u0430\u043B\u043E \u0440\u0456\u0448\u0435\u043D\u043D\u044F \u0441\u0438\u043B\u0438) \u0432 \u0404\u0414\u0420\u0421\u0420 \u041D\u0415\u041C\u0410\u0404 \u2014 \u0446\u0435 court.gov.ua/fair."
   };
 }
 var transit = /* @__PURE__ */ new Map();
@@ -37722,7 +37969,15 @@ function trimChrome(text) {
   const end = text.indexOf("\u0412\u0432\u0435\u0434\u0456\u0442\u044C, \u0431\u0443\u0434\u044C \u043B\u0430\u0441\u043A\u0430, \u043B\u043E\u0433\u0456\u043D \u0442\u0430 \u043F\u0430\u0440\u043E\u043B\u044C");
   return text.slice(start >= 0 ? start : 0, end > start ? end : text.length).trim();
 }
-var OPERATIVE = /^\s*(ПОСТАНОВИВ|ПОСТАНОВИЛА|УХВАЛИВ|УХВАЛИЛА|ВИРІШИВ|ВИРІШИЛА|ЗАСУДИВ|ЗАСУДИЛА)\s*:?\s*$/m;
+var OPERATIVE = new RegExp(
+  `^\\s*(?:${["\u043F\u043E\u0441\u0442\u0430\u043D\u043E\u0432\u0438\u043B\u0430", "\u043F\u043E\u0441\u0442\u0430\u043D\u043E\u0432\u0438\u0432", "\u0443\u0445\u0432\u0430\u043B\u0438\u043B\u0430", "\u0443\u0445\u0432\u0430\u043B\u0438\u0432", "\u0432\u0438\u0440\u0456\u0448\u0438\u043B\u0430", "\u0432\u0438\u0440\u0456\u0448\u0438\u0432", "\u0437\u0430\u0441\u0443\u0434\u0438\u043B\u0430", "\u0437\u0430\u0441\u0443\u0434\u0438\u0432"].map((w) => [...w].join("\\s*")).join("|")})\\s*:?\\s*$`,
+  "gimu"
+);
+function findOperative(text) {
+  let at = -1;
+  for (const m of text.matchAll(OPERATIVE)) at = m.index;
+  return at;
+}
 var CHUNK = 2e4;
 var MAX_HITS = 25;
 async function document(id, mode = "head", needle) {
@@ -37745,13 +38000,13 @@ async function document(id, mode = "head", needle) {
         "http"
       );
     }
-    if (BLOCK.test(res.body)) {
-      throw new SourceError(
-        "\u0421\u0422\u041E\u041F: \u0440\u0435\u0454\u0441\u0442\u0440 \u043F\u043E\u043A\u0430\u0437\u0430\u0432 \u0431\u043B\u043E\u043A-\u0441\u0442\u043E\u0440\u0456\u043D\u043A\u0443. \u041E\u0431\u0445\u0456\u0434 \u043D\u0435 \u0432\u0438\u043A\u043E\u043D\u0443\u0454\u0442\u044C\u0441\u044F.",
-        "blocked"
-      );
-    }
     if (!hasDecision(res.body)) {
+      if (BLOCK.test(res.body)) {
+        throw new SourceError(
+          "\u0421\u0422\u041E\u041F: \u0440\u0435\u0454\u0441\u0442\u0440 \u043F\u043E\u043A\u0430\u0437\u0430\u0432 \u0431\u043B\u043E\u043A-\u0441\u0442\u043E\u0440\u0456\u043D\u043A\u0443. \u041E\u0431\u0445\u0456\u0434 \u043D\u0435 \u0432\u0438\u043A\u043E\u043D\u0443\u0454\u0442\u044C\u0441\u044F.",
+          "blocked"
+        );
+      }
       throw new SourceError(
         `\u0417\u0430 id ${id} \u0440\u0435\u0454\u0441\u0442\u0440 \u043D\u0435 \u043F\u043E\u043A\u0430\u0437\u0430\u0432 \u0442\u0435\u043A\u0441\u0442\u0443 \u0440\u0456\u0448\u0435\u043D\u043D\u044F: \u0442\u0430\u043A\u043E\u0433\u043E \u0434\u043E\u043A\u0443\u043C\u0435\u043D\u0442\u0430 \u043D\u0435\u043C\u0430\u0454 \u0430\u0431\u043E \u0434\u043E\u0441\u0442\u0443\u043F \u0434\u043E \u043D\u044C\u043E\u0433\u043E \u043E\u0431\u043C\u0435\u0436\u0435\u043D\u043E. \u0426\u0435 \u041D\u0415 \u0434\u043E\u043A\u0430\u0437, \u0449\u043E \u0440\u0456\u0448\u0435\u043D\u043D\u044F \u043D\u0435 \u0456\u0441\u043D\u0443\u0454 \u2014 \u043F\u0435\u0440\u0435\u0432\u0456\u0440 id \u0443 \u0440\u0435\u0437\u0443\u043B\u044C\u0442\u0430\u0442\u0430\u0445 edrsr_search.`,
         "unavailable"
@@ -37766,9 +38021,9 @@ async function document(id, mode = "head", needle) {
   let text;
   let note = "";
   if (mode === "operative") {
-    const m = OPERATIVE.exec(body);
-    if (m) {
-      text = body.slice(m.index).slice(0, CHUNK);
+    const at = findOperative(body);
+    if (at >= 0) {
+      text = body.slice(at).slice(0, CHUNK);
       note = "\u0420\u0435\u0437\u043E\u043B\u044E\u0442\u0438\u0432\u043D\u0430 \u0447\u0430\u0441\u0442\u0438\u043D\u0430 \u2014 \u0442\u0435, \u0447\u0438\u043C \u0441\u043F\u0440\u0430\u0432\u0430 \u0437\u0430\u043A\u0456\u043D\u0447\u0438\u043B\u0430\u0441\u044C.";
     } else {
       text = body.slice(-CHUNK);
@@ -37807,7 +38062,8 @@ var ANONYMISATION_NOTE = "\u0410\u043D\u043E\u043D\u0456\u043C\u0456\u0437\u0430
 
 // src/index.ts
 var server = new McpServer(
-  { name: "ua-legal-sources", version: "0.1.0" },
+  // One version for the plugin and its server; check-plugin enforces it.
+  { name: "ua-legal-sources", version: package_default.version },
   {
     instructions: "\u0423\u043A\u0440\u0430\u0457\u043D\u0441\u044C\u043A\u0456 \u043F\u0440\u0430\u0432\u043E\u0432\u0456 \u0434\u0436\u0435\u0440\u0435\u043B\u0430 \u0437 \u043B\u043E\u043A\u0430\u043B\u044C\u043D\u043E\u0457 \u043C\u0430\u0448\u0438\u043D\u0438. \u0412\u0438\u043A\u043E\u0440\u0438\u0441\u0442\u043E\u0432\u0443\u0439 \u0446\u0456 \u0456\u043D\u0441\u0442\u0440\u0443\u043C\u0435\u043D\u0442\u0438 \u0437\u0430\u043C\u0456\u0441\u0442\u044C web fetch: rada_* \u0434\u043B\u044F \u0437\u0430\u043A\u043E\u043D\u043E\u0434\u0430\u0432\u0441\u0442\u0432\u0430 (\u043E\u0444\u0456\u0446\u0456\u0439\u043D\u0435 API data.rada.gov.ua), lpd_* \u0434\u043B\u044F \u043F\u0440\u0430\u0432\u043E\u0432\u0438\u0445 \u043F\u043E\u0437\u0438\u0446\u0456\u0439 \u0412\u0421, edrsr_* \u0434\u043B\u044F \u0440\u0435\u0454\u0441\u0442\u0440\u0443 \u0441\u0443\u0434\u043E\u0432\u0438\u0445 \u0440\u0456\u0448\u0435\u043D\u044C. \u041D\u0456\u043A\u043E\u043B\u0438 \u043D\u0435 \u0446\u0438\u0442\u0443\u0439 \u043D\u043E\u0440\u043C\u0443 \u0437 \u043F\u0430\u043C'\u044F\u0442\u0456. \u041F\u043E\u0440\u043E\u0436\u043D\u0456\u0439 \u0440\u0435\u0437\u0443\u043B\u044C\u0442\u0430\u0442 \u043E\u0437\u043D\u0430\u0447\u0430\u0454 \xAB\u044F \u043D\u0435 \u0437\u043D\u0430\u0439\u0448\u043E\u0432\xBB, \u0430 \u043D\u0435 \xAB\u0446\u044C\u043E\u0433\u043E \u043D\u0435 \u0456\u0441\u043D\u0443\u0454\xBB. \u0421\u0442\u0430\u043D\u0443 \u0441\u043F\u0440\u0430\u0432\u0438 (\u0447\u0438 \u043D\u0430\u0431\u0440\u0430\u043B\u043E \u0440\u0456\u0448\u0435\u043D\u043D\u044F \u0441\u0438\u043B\u0438) \u0442\u0443\u0442 \u043D\u0435\u043C\u0430\u0454 \u2014 court.gov.ua/fair \u043F\u0456\u0434 reCAPTCHA."
   }
@@ -37851,9 +38107,49 @@ async function guard(fn) {
     return fail(err);
   }
 }
+var TOOL_BUDGET_MS = 45e3;
+var KEEP_MS = 10 * 6e4;
+var running = /* @__PURE__ */ new Map();
+function budgeted(name, handler) {
+  return async (args) => {
+    const now2 = Date.now();
+    for (const [k, v] of running) if (now2 - v.at > KEEP_MS) running.delete(k);
+    const key = `${name}:${JSON.stringify(args)}`;
+    let entry = running.get(key);
+    if (!entry) {
+      entry = { work: handler(args), at: now2 };
+      running.set(key, entry);
+    }
+    const work = entry.work;
+    let timer;
+    const deadline = new Promise((resolve2) => {
+      timer = setTimeout(() => resolve2("pending"), TOOL_BUDGET_MS);
+    });
+    const result = await Promise.race([work, deadline]);
+    clearTimeout(timer);
+    if (result !== "pending") {
+      running.delete(key);
+      return result;
+    }
+    return {
+      isError: true,
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({
+            error: `\u0414\u0436\u0435\u0440\u0435\u043B\u043E \u0432\u0456\u0434\u043F\u043E\u0432\u0456\u0434\u0430\u0454 \u043F\u043E\u0432\u0456\u043B\u044C\u043D\u043E (\u043B\u0456\u043C\u0456\u0442\u0438 \u0432\u0432\u0456\u0447\u043B\u0438\u0432\u043E\u0441\u0442\u0456 \u0434\u0435\u0440\u0436\u0430\u0432\u043D\u0438\u0445 \u0441\u0430\u0439\u0442\u0456\u0432), \u0442\u043E\u0436 \u0432\u0456\u0434\u043F\u043E\u0432\u0456\u0434\u044C \u0449\u0435 \u043D\u0435 \u0433\u043E\u0442\u043E\u0432\u0430. \u0420\u043E\u0431\u043E\u0442\u0430 \u0442\u0440\u0438\u0432\u0430\u0454 \u0443 \u0444\u043E\u043D\u0456.`,
+            kind: "pending",
+            verified: false,
+            reminder: "\u041F\u043E\u0432\u0442\u043E\u0440\u0438 \u0422\u041E\u0419 \u0421\u0410\u041C\u0418\u0419 \u0432\u0438\u043A\u043B\u0438\u043A \u0437 \u0442\u0438\u043C\u0438 \u0441\u0430\u043C\u0438\u043C\u0438 \u0430\u0440\u0433\u0443\u043C\u0435\u043D\u0442\u0430\u043C\u0438 \u0437\u0430 20\u201330 \u0441 \u2014 \u0432\u0456\u043D \u043E\u0442\u0440\u0438\u043C\u0430\u0454 \u0433\u043E\u0442\u043E\u0432\u0438\u0439 \u0440\u0435\u0437\u0443\u043B\u044C\u0442\u0430\u0442 \u0431\u0435\u0437 \u043D\u043E\u0432\u043E\u0433\u043E \u0437\u0430\u043F\u0438\u0442\u0443. \u041D\u0435 \u0440\u043E\u0431\u0438 \u0432\u0438\u0441\u043D\u043E\u0432\u043A\u0456\u0432 \u0456 \u043D\u0435 \u0432\u0456\u0434\u043F\u043E\u0432\u0456\u0434\u0430\u0439 \u0437 \u043F\u0430\u043C'\u044F\u0442\u0456, \u043F\u043E\u043A\u0438 \u0440\u0435\u0437\u0443\u043B\u044C\u0442\u0430\u0442\u0443 \u043D\u0435\u043C\u0430\u0454."
+          })
+        }
+      ]
+    };
+  };
+}
 async function textAsOf(rawNreg, date5) {
   const meta3 = await getMeta(rawNreg);
-  const current = () => getText(meta3.nreg);
+  const current = () => getText(meta3.nreg, void 0, meta3.currentRedaction);
   if (!date5) {
     return {
       meta: meta3,
@@ -37869,7 +38165,7 @@ async function textAsOf(rawNreg, date5) {
       "input"
     );
   }
-  const a = redactionAsOf(meta3, date5, now().slice(0, 10));
+  const a = redactionAsOf(meta3, date5, kyivToday());
   if (a.kind === "before") {
     return { meta: meta3, text: null, asOf: date5, firstRedaction: a.firstRedaction };
   }
@@ -37923,10 +38219,10 @@ server.registerTool(
     },
     annotations: { readOnlyHint: true, openWorldHint: true }
   },
-  async ({ name }) => guard(async () => {
+  budgeted("rada_resolve", async ({ name }) => guard(async () => {
     const r = await resolve(name);
     return { ...r, retrieved_at: now(), act_vs_article: RADA_STATUS_NOTE };
-  })
+  }))
 );
 server.registerTool(
   "rada_status",
@@ -37938,7 +38234,7 @@ server.registerTool(
     },
     annotations: { readOnlyHint: true, openWorldHint: true }
   },
-  async ({ nreg }) => guard(async () => {
+  budgeted("rada_status", async ({ nreg }) => guard(async () => {
     const meta3 = await getMeta(nreg);
     const card = await getCard(nreg);
     return {
@@ -37960,13 +38256,13 @@ server.registerTool(
       retrieved_at: now(),
       note: RADA_STATUS_NOTE
     };
-  })
+  }))
 );
 server.registerTool(
   "rada_unit",
   {
     title: "\u0422\u0435\u043A\u0441\u0442 \u0441\u0442\u0430\u0442\u0442\u0456 \u0430\u0431\u043E \u0456\u043D\u0448\u043E\u0457 \u043E\u0434\u0438\u043D\u0438\u0446\u0456 \u0430\u043A\u0442\u0430",
-    description: "\u0414\u043E\u0441\u043B\u0456\u0432\u043D\u0438\u0439 \u0442\u0435\u043A\u0441\u0442 \u043E\u0434\u043D\u0456\u0454\u0457 \u0441\u0442\u0430\u0442\u0442\u0456, \u0440\u043E\u0437\u0434\u0456\u043B\u0443, \u0433\u043B\u0430\u0432\u0438, \u043F\u0456\u0434\u0440\u043E\u0437\u0434\u0456\u043B\u0443 \u0447\u0438 \u043F\u0430\u0440\u0430\u0433\u0440\u0430\u0444\u0430. \u041F\u0440\u0438\u0439\u043C\u0430\u0454 \xAB130\xBB, \xAB\u0441\u0442.130\xBB, \xAB1270\xBB, \xAB111-1\xBB, \xAB\u0420\u043E\u0437\u0434\u0456\u043B IV\xBB, \xAB\u041F\u0456\u0434\u0440\u043E\u0437\u0434\u0456\u043B 1\xBB. \u041E\u043A\u0440\u0435\u043C\u043E \u043F\u043E\u0437\u043D\u0430\u0447\u0430\u0454, \u0449\u043E \u0441\u0442\u0430\u0442\u0442\u044E \u0412\u0418\u041A\u041B\u042E\u0427\u0415\u041D\u041E, \u0456 \u044F\u043A\u0438\u043C \u0437\u0430\u043A\u043E\u043D\u043E\u043C. \u0421\u043B\u0443\u0436\u0431\u043E\u0432\u0456 \u043F\u043E\u0437\u043D\u0430\u0447\u043A\u0438 \u043F\u0440\u043E \u0437\u043C\u0456\u043D\u0438 \u0443 {\u0444\u0456\u0433\u0443\u0440\u043D\u0438\u0445 \u0434\u0443\u0436\u043A\u0430\u0445} \u0432\u0456\u0434\u0434\u0430\u044E\u0442\u044C\u0441\u044F \u043E\u043A\u0440\u0435\u043C\u043E \u0432\u0456\u0434 \u0442\u0435\u043A\u0441\u0442\u0443 \u043D\u043E\u0440\u043C\u0438, \u0449\u043E\u0431 \u0432\u043E\u043D\u0438 \u043D\u0435 \u043F\u043E\u0442\u0440\u0430\u043F\u0438\u043B\u0438 \u0432 \u0446\u0438\u0442\u0430\u0442\u0443. \u041F\u0430\u0440\u0430\u043C\u0435\u0442\u0440 date \u0434\u0430\u0454 \u0440\u0435\u0434\u0430\u043A\u0446\u0456\u044E \u0441\u0442\u0430\u043D\u043E\u043C \u043D\u0430 \u0434\u0430\u0442\u0443. \u041F\u043E\u0432\u0435\u0440\u0442\u0430\u0454 \u041C\u0410\u0421\u0418\u0412 occurrences: \u044F\u043A\u0449\u043E ambiguous=true, \u043F\u0456\u0434 \u0446\u0438\u043C \u043D\u043E\u043C\u0435\u0440\u043E\u043C \u0432 \u0430\u043A\u0442\u0456 \u0454 \u043A\u0456\u043B\u044C\u043A\u0430 \u0440\u0456\u0437\u043D\u0438\u0445 \u0441\u0442\u0430\u0442\u0435\u0439 (\u043D\u0430\u0434\u0440\u044F\u0434\u043A\u043E\u0432\u0456 \u043D\u043E\u043C\u0435\u0440\u0438 \u0432 \u0442\u0435\u043A\u0441\u0442\u043E\u0432\u043E\u043C\u0443 \u0435\u043A\u0441\u043F\u043E\u0440\u0442\u0456 \u0434\u0440\u0443\u043A\u0443\u044E\u0442\u044C\u0441\u044F \u044F\u043A \u0437\u0432\u0438\u0447\u0430\u0439\u043D\u0456) \u2014 \u0442\u043E\u0434\u0456 \u043D\u0435 \u0432\u0438\u0431\u0438\u0440\u0430\u0439 \u0441\u0430\u043C, \u043F\u043E\u043A\u0430\u0436\u0438 \u043E\u0431\u0438\u0434\u0432\u0456.",
+    description: "\u0414\u043E\u0441\u043B\u0456\u0432\u043D\u0438\u0439 \u0442\u0435\u043A\u0441\u0442 \u043E\u0434\u043D\u0456\u0454\u0457 \u0441\u0442\u0430\u0442\u0442\u0456, \u0440\u043E\u0437\u0434\u0456\u043B\u0443, \u0433\u043B\u0430\u0432\u0438, \u043F\u0456\u0434\u0440\u043E\u0437\u0434\u0456\u043B\u0443 \u0447\u0438 \u043F\u0430\u0440\u0430\u0433\u0440\u0430\u0444\u0430. \u041F\u0440\u0438\u0439\u043C\u0430\u0454 \xAB130\xBB, \xAB\u0441\u0442.130\xBB, \xAB1270\xBB, \xAB111-1\xBB, \xAB\u0447. 2 \u0441\u0442. 284\xBB, \xAB\u043F. 1 \u0447. 2 \u0441\u0442. 284\xBB, \xAB\u0420\u043E\u0437\u0434\u0456\u043B IV\xBB, \xAB\u041F\u0456\u0434\u0440\u043E\u0437\u0434\u0456\u043B 1\xBB, \xAB\u041F\u0440\u0438\u043A\u0456\u043D\u0446\u0435\u0432\u0456 \u0442\u0430 \u043F\u0435\u0440\u0435\u0445\u0456\u0434\u043D\u0456 \u043F\u043E\u043B\u043E\u0436\u0435\u043D\u043D\u044F \u043F. 19\xBB. \u041E\u043A\u0440\u0435\u043C\u043E \u043F\u043E\u0437\u043D\u0430\u0447\u0430\u0454, \u0449\u043E \u0441\u0442\u0430\u0442\u0442\u044E \u0412\u0418\u041A\u041B\u042E\u0427\u0415\u041D\u041E, \u0456 \u044F\u043A\u0438\u043C \u0437\u0430\u043A\u043E\u043D\u043E\u043C. \u0421\u043B\u0443\u0436\u0431\u043E\u0432\u0456 \u043F\u043E\u0437\u043D\u0430\u0447\u043A\u0438 \u043F\u0440\u043E \u0437\u043C\u0456\u043D\u0438 \u0443 {\u0444\u0456\u0433\u0443\u0440\u043D\u0438\u0445 \u0434\u0443\u0436\u043A\u0430\u0445} \u0432\u0456\u0434\u0434\u0430\u044E\u0442\u044C\u0441\u044F \u043E\u043A\u0440\u0435\u043C\u043E \u0432\u0456\u0434 \u0442\u0435\u043A\u0441\u0442\u0443 \u043D\u043E\u0440\u043C\u0438, \u0449\u043E\u0431 \u0432\u043E\u043D\u0438 \u043D\u0435 \u043F\u043E\u0442\u0440\u0430\u043F\u0438\u043B\u0438 \u0432 \u0446\u0438\u0442\u0430\u0442\u0443. \u041F\u0430\u0440\u0430\u043C\u0435\u0442\u0440 date \u0434\u0430\u0454 \u0440\u0435\u0434\u0430\u043A\u0446\u0456\u044E \u0441\u0442\u0430\u043D\u043E\u043C \u043D\u0430 \u0434\u0430\u0442\u0443. \u041F\u043E\u0432\u0435\u0440\u0442\u0430\u0454 \u041C\u0410\u0421\u0418\u0412 occurrences: \u044F\u043A\u0449\u043E ambiguous=true, \u043F\u0456\u0434 \u0446\u0438\u043C \u043D\u043E\u043C\u0435\u0440\u043E\u043C \u0432 \u0430\u043A\u0442\u0456 \u0454 \u043A\u0456\u043B\u044C\u043A\u0430 \u0440\u0456\u0437\u043D\u0438\u0445 \u0441\u0442\u0430\u0442\u0435\u0439 (\u043D\u0430\u0434\u0440\u044F\u0434\u043A\u043E\u0432\u0456 \u043D\u043E\u043C\u0435\u0440\u0438 \u0432 \u0442\u0435\u043A\u0441\u0442\u043E\u0432\u043E\u043C\u0443 \u0435\u043A\u0441\u043F\u043E\u0440\u0442\u0456 \u0434\u0440\u0443\u043A\u0443\u044E\u0442\u044C\u0441\u044F \u044F\u043A \u0437\u0432\u0438\u0447\u0430\u0439\u043D\u0456) \u2014 \u0442\u043E\u0434\u0456 \u043D\u0435 \u0432\u0438\u0431\u0438\u0440\u0430\u0439 \u0441\u0430\u043C, \u043F\u043E\u043A\u0430\u0436\u0438 \u043E\u0431\u0438\u0434\u0432\u0456.",
     inputSchema: {
       nreg: NREG.describe("\u0421\u0438\u0441\u0442\u0435\u043C\u043D\u0438\u0439 \u043D\u043E\u043C\u0435\u0440 \u0430\u043A\u0442\u0430, \u043D\u0430\u043F\u0440. \xAB8073-10\xBB."),
       unit: external_exports.string().min(1).max(100).describe("\u041D\u043E\u043C\u0435\u0440 \u0441\u0442\u0430\u0442\u0442\u0456 \u0430\u0431\u043E \u043D\u0430\u0437\u0432\u0430 \u0441\u0442\u0440\u0443\u043A\u0442\u0443\u0440\u043D\u043E\u0457 \u043E\u0434\u0438\u043D\u0438\u0446\u0456."),
@@ -37976,14 +38272,14 @@ server.registerTool(
     },
     annotations: { readOnlyHint: true, openWorldHint: true }
   },
-  async ({ nreg, unit, date: date5 }) => guard(async () => {
+  budgeted("rada_unit", async ({ nreg, unit, date: date5 }) => guard(async () => {
     const t = await textAsOf(nreg, date5);
     const { meta: meta3 } = t;
     if (!t.text) {
       return beforeExisted(meta3.nreg, meta3.nazva, date5, t.firstRedaction);
     }
     const text = t.text;
-    const index = buildIndex(text.body);
+    const index = buildIndex(text.body, t.asOf ?? kyivToday());
     const u = sliceUnit(index, unit);
     if (!u.found) {
       return {
@@ -38003,6 +38299,15 @@ server.registerTool(
       excluded: o.excluded,
       excluded_warning: o.excluded ? `\u2620\uFE0F \u0426\u044E \u043E\u0434\u0438\u043D\u0438\u0446\u044E \u0412\u0418\u041A\u041B\u042E\u0427\u0415\u041D\u041E \u0437 \u0430\u043A\u0442\u0430 (${o.excluded.basis}). \u0410\u043A\u0442 \u043C\u043E\u0436\u0435 \u0431\u0443\u0442\u0438 \u0447\u0438\u043D\u043D\u0438\u043C, \u0430\u043B\u0435 \u0446\u0456\u0454\u0457 \u043D\u043E\u0440\u043C\u0438 \u0432\u0436\u0435 \u043D\u0435\u043C\u0430\u0454.` : void 0,
       amendment_markers: o.markers,
+      part_note: o.partNote,
+      unconstitutional: o.unconstitutional?.map((x) => ({
+        text: x.text,
+        lost_force_on: x.lostForceOn,
+        partial: x.partial,
+        in_force: x.inForce,
+        marker: x.marker
+      })),
+      unconstitutional_warning: o.unconstitutional ? `\u2696\uFE0F \u0427\u0430\u0441\u0442\u0438\u043D\u0443 \u0442\u0435\u043A\u0441\u0442\u0443 \u041A\u043E\u043D\u0441\u0442\u0438\u0442\u0443\u0446\u0456\u0439\u043D\u0438\u0439 \u0421\u0443\u0434 \u0432\u0438\u0437\u043D\u0430\u0432 \u043D\u0435\u043A\u043E\u043D\u0441\u0442\u0438\u0442\u0443\u0446\u0456\u0439\u043D\u043E\u044E. \u0422\u0435, \u0449\u043E \u0432\u0436\u0435 \u043D\u0435 \u0434\u0456\u0454, \u0437 text \u043F\u0440\u0438\u0431\u0440\u0430\u043D\u043E; \u0440\u0435\u0448\u0442\u0443 \u043B\u0438\u0448\u0435\u043D\u043E, \u0430\u043B\u0435 \u043F\u0435\u0440\u0435\u0432\u0456\u0440 \u043A\u043E\u0436\u0435\u043D \u043F\u0443\u043D\u043A\u0442 unconstitutional: lost_force_on \u2014 \u0437 \u044F\u043A\u043E\u0457 \u0434\u0430\u0442\u0438 \u043D\u0435 \u0434\u0456\u0454, partial \u2014 \u0440\u0456\u0448\u0435\u043D\u043D\u044F \u0441\u0442\u043E\u0441\u0443\u0454\u0442\u044C\u0441\u044F \u043B\u0438\u0448\u0435 \u043E\u043A\u0440\u0435\u043C\u043E\u0433\u043E \u0430\u0441\u043F\u0435\u043A\u0442\u0443 (\xAB\u0432 \u0442\u0456\u043C, \u0449\u043E\u2026\xBB), in_force: null \u2014 \u0434\u0430\u0442\u0443 \u0437 \u043F\u043E\u0437\u043D\u0430\u0447\u043A\u0438 \u0432\u0438\u0437\u043D\u0430\u0447\u0438\u0442\u0438 \u043D\u0435 \u0432\u0434\u0430\u043B\u043E\u0441\u044F. \u041D\u0435 \u0446\u0438\u0442\u0443\u0439 \u0442\u0430\u043A\u0443 \u043D\u043E\u0440\u043C\u0443 \u044F\u043A \u0447\u0438\u043D\u043D\u0443, \u043D\u0435 \u0437\u0432\u0456\u0440\u0438\u0432\u0448\u0438 \u0434\u0430\u0442\u0443 \u0439 \u043E\u0431\u0441\u044F\u0433.` : void 0,
       char_count: o.charCount,
       truncated_warning: o.truncated ? `\u041E\u0434\u0438\u043D\u0438\u0446\u044F \u0437\u0430\u0432\u0435\u043B\u0438\u043A\u0430: \u043F\u043E\u043A\u0430\u0437\u0430\u043D\u043E \u043F\u0435\u0440\u0448\u0456 ${o.text.length} \u0456\u0437 ${o.charCount} \u0437\u043D\u0430\u043A\u0456\u0432. \u0414\u043B\u044F \u0446\u0438\u0442\u0443\u0432\u0430\u043D\u043D\u044F \u0437\u0432\u0443\u0437\u044C \u0430\u0434\u0440\u0435\u0441\u0443 \u0434\u043E \u043E\u043A\u0440\u0435\u043C\u043E\u0457 \u0441\u0442\u0430\u0442\u0442\u0456 \u0447\u0438 \u0433\u043B\u0430\u0432\u0438 (\u0437\u043C\u0456\u0441\u0442 \u2014 rada_list_units).` : void 0
     }));
@@ -38023,7 +38328,7 @@ server.registerTool(
       retrieved_at: text.retrievedAt,
       from_cache: text.fromCache
     };
-  })
+  }))
 );
 server.registerTool(
   "rada_list_units",
@@ -38037,7 +38342,7 @@ server.registerTool(
     },
     annotations: { readOnlyHint: true, openWorldHint: true }
   },
-  async ({ nreg, filter, date: date5 }) => guard(async () => {
+  budgeted("rada_list_units", async ({ nreg, filter, date: date5 }) => guard(async () => {
     const t = await textAsOf(nreg, date5);
     if (!t.text) {
       return beforeExisted(t.meta.nreg, t.meta.nazva, date5, t.firstRedaction);
@@ -38067,7 +38372,7 @@ server.registerTool(
       retrieved_at: text.retrievedAt,
       from_cache: text.fromCache
     };
-  })
+  }))
 );
 server.registerTool(
   "lpd_search",
@@ -38081,7 +38386,7 @@ server.registerTool(
     },
     annotations: { readOnlyHint: true, openWorldHint: true }
   },
-  async ({ query, semantic, limit }) => guard(async () => {
+  budgeted("lpd_search", async ({ query, semantic, limit }) => guard(async () => {
     const r = await searchPositions(query, semantic ?? false);
     return {
       query,
@@ -38092,7 +38397,7 @@ server.registerTool(
       note: r.note,
       retrieved_at: now()
     };
-  })
+  }))
 );
 server.registerTool(
   "lpd_position",
@@ -38102,12 +38407,12 @@ server.registerTool(
     inputSchema: { id: ID },
     annotations: { readOnlyHint: true, openWorldHint: true }
   },
-  async ({ id }) => guard(async () => ({
+  budgeted("lpd_position", async ({ id }) => guard(async () => ({
     id,
     position: await position(id),
     source_url: `${SITE}/legal-position/${id}`,
     retrieved_at: now()
-  }))
+  })))
 );
 server.registerTool(
   "lpd_digest_search",
@@ -38117,11 +38422,11 @@ server.registerTool(
     inputSchema: { query: external_exports.string().min(3).max(500) },
     annotations: { readOnlyHint: true, openWorldHint: true }
   },
-  async ({ query }) => guard(async () => ({
+  budgeted("lpd_digest_search", async ({ query }) => guard(async () => ({
     query,
     ...await searchDigests(query),
     retrieved_at: now()
-  }))
+  })))
 );
 server.registerTool(
   "edrsr_search",
@@ -38139,7 +38444,7 @@ server.registerTool(
     },
     annotations: { readOnlyHint: true, openWorldHint: true }
   },
-  async (args) => guard(async () => {
+  budgeted("edrsr_search", async (args) => guard(async () => {
     if (!args.expression && !args.case_number && !args.reg_number && !args.judge) {
       throw new SourceError(
         "\u041F\u043E\u0442\u0440\u0456\u0431\u0435\u043D \u0445\u043E\u0447\u0430 \u0431 \u043E\u0434\u0438\u043D \u0437\u043C\u0456\u0441\u0442\u043E\u0432\u043D\u0438\u0439 \u043A\u0440\u0438\u0442\u0435\u0440\u0456\u0439: expression, case_number, reg_number \u0430\u0431\u043E judge. \u041F\u043E\u0440\u043E\u0436\u043D\u0456\u0439 \u043F\u043E\u0448\u0443\u043A \u0443 \u0404\u0414\u0420\u0421\u0420 \u043D\u0435 \u0440\u043E\u0431\u0438\u0442\u044C\u0441\u044F \u2014 \u0446\u0435 \u043C\u0430\u0441\u043E\u0432\u0430 \u0432\u0438\u0431\u0456\u0440\u043A\u0430.",
@@ -38161,7 +38466,7 @@ server.registerTool(
       anonymisation: ANONYMISATION_NOTE,
       retrieved_at: now()
     };
-  })
+  }))
 );
 server.registerTool(
   "edrsr_document",
@@ -38175,13 +38480,13 @@ server.registerTool(
     },
     annotations: { readOnlyHint: true, openWorldHint: true }
   },
-  async ({ id, mode, needle }) => guard(async () => ({
+  budgeted("edrsr_document", async ({ id, mode, needle }) => guard(async () => ({
     ...await document(id, mode ?? "head", needle),
     documents_used: docsFetched().length,
     documents_budget: MAX_DOCS,
     anonymisation: ANONYMISATION_NOTE,
     retrieved_at: now()
-  }))
+  })))
 );
 var transport = new StdioServerTransport();
 await server.connect(transport);

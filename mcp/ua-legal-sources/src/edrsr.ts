@@ -169,6 +169,11 @@ export function filterByCase(
   return { rows: kept, substringOnly: kept.length === 0 && rows.length > 0 };
 }
 
+/** A pre-trial investigation number (ЄРДР): 17 digits. */
+export function isErdr(value?: string): boolean {
+  return /^\d{17}$/.test((value ?? "").replace(/\s/g, ""));
+}
+
 export interface EdrsrSearchInput {
   expression?: string;
   caseNumber?: string;
@@ -191,9 +196,20 @@ export async function search(
 ): Promise<EdrsrSearchResult> {
   // A search is the start of a new question about the register.
   resetBudget();
+  // ☠️ The «Номер справи» field matches only a court case number (ЄУН). A
+  // 17-digit ЄРДР number there finds nothing, while the same number as the text
+  // query finds the proceeding's rulings (measured 2026-10-10: 0 rows vs 4).
+  const erdr = isErdr(input.caseNumber);
+  const expression = erdr
+    ? [input.expression, input.caseNumber!.replace(/\s/g, "")].filter(Boolean).join(" ")
+    : input.expression;
+  const caseNumber = erdr ? undefined : input.caseNumber;
+  const erdrNote = erdr
+    ? "Номер ЄРДР шукано як текст запиту: поле номера справи приймає лише ЄУН суду. "
+    : "";
   const form: Record<string, string> = {
-    SearchExpression: stripAngles(input.expression),
-    CaseNumber: stripAngles(input.caseNumber),
+    SearchExpression: stripAngles(expression),
+    CaseNumber: stripAngles(caseNumber),
     RegNumber: stripAngles(input.regNumber),
     ChairmenName: stripAngles(input.judge),
     UserCourtCode: stripAngles(input.courtCode),
@@ -217,22 +233,25 @@ export async function search(
         `що справи або практики не існує.`,
     };
   }
-  if (BLOCK.test(res.body)) {
-    return {
-      status: "blocked",
-      found: null,
-      countCapped: false,
-      rows: [],
-      note:
-        "СТОП: реєстр показав блок-сторінку. Обхід не виконується. " +
-        "Повідом користувача і спробуй пізніше.",
-    };
-  }
-
   const found = parseFound(res.body);
   const rows = parseRows(res.body);
 
   if (found === null && rows.length === 0) {
+    // ☠️ Only a page that is NOT a result can be a block page. The results page
+    // echoes the query, and rulings quote «доступ обмежено», «тимчасово
+    // недоступний»: checking the whole page reported a block for a search that
+    // had in fact succeeded.
+    if (BLOCK.test(res.body)) {
+      return {
+        status: "blocked",
+        found: null,
+        countCapped: false,
+        rows: [],
+        note:
+          "СТОП: реєстр показав блок-сторінку. Обхід не виконується. " +
+          "Повідом користувача і спробуй пізніше.",
+      };
+    }
     // Neither a counter nor rows: the results view did not render at all.
     // A broken request or a soft block — NOT «нічого не знайдено».
     return {
@@ -247,7 +266,7 @@ export async function search(
     };
   }
 
-  const { rows: filtered, substringOnly } = filterByCase(rows, input.caseNumber);
+  const { rows: filtered, substringOnly } = filterByCase(rows, caseNumber);
 
   if (filtered.length === 0) {
     return {
@@ -256,15 +275,16 @@ export async function search(
       countCapped: found === 100000,
       rows: [],
       note:
+        erdrNote +
         (substringOnly
           ? `Реєстр повернув ${rows.length} рядків, але жоден не належить ` +
-            `справі ${input.caseNumber} — пошук за номером справи працює як ` +
+            `справі ${caseNumber} — пошук за номером справи працює як ` +
             `пошук підрядка. Для цієї справи результат нульовий. `
           : "") +
         "НУЛЬ рядків. Це «я не знайшов», а не «практики/справи немає». " +
         "Перевір: відмінок (додай `*` для морфології), стоп-слова " +
-        "(ОСОБА, АДРЕСА, грн), літерний суфікс у номері справи, " +
-        "ЄРДР у полі номера справи для кримінальних проваджень.",
+        "(ОСОБА, АДРЕСА, грн), літерний суфікс у номері справи. Номер ЄРДР " +
+        "шукається як текст запиту (expression), не як номер справи.",
     };
   }
 
@@ -274,6 +294,7 @@ export async function search(
     countCapped: found === 100000,
     rows: filtered,
     note:
+      erdrNote +
       "Посилання лише як https://reyestr.court.gov.ua/Review/<id> — URL пошуку " +
       "не існує, пошук працює тільки через POST. Процесуального стану (чи " +
       "набрало рішення сили) в ЄДРСР НЕМАЄ — це court.gov.ua/fair.",
@@ -335,9 +356,29 @@ export function trimChrome(text: string): string {
     .trim();
 }
 
-/** Резолютивна частина markers — «чим закінчилось» lives at the very END. */
-const OPERATIVE =
-  /^\s*(ПОСТАНОВИВ|ПОСТАНОВИЛА|УХВАЛИВ|УХВАЛИЛА|ВИРІШИВ|ВИРІШИЛА|ЗАСУДИВ|ЗАСУДИЛА)\s*:?\s*$/m;
+/**
+ * Резолютивна частина markers — «чим закінчилось» lives at the very END.
+ *
+ * ☠️ Courts often space the letters out («П О С Т А Н О В И В:») or write them
+ * in lower case («у х в а л и в:»). Matching only the solid capitals missed
+ * those and showed the tail of the document instead.
+ */
+const OPERATIVE = new RegExp(
+  `^\\s*(?:${["постановила", "постановив", "ухвалила", "ухвалив", "вирішила", "вирішив", "засудила", "засудив"]
+    .map((w) => [...w].join("\\s*"))
+    .join("|")})\\s*:?\\s*$`,
+  "gimu",
+);
+
+/**
+ * Where the резолютивна частина starts, or -1. The LAST marker: it closes the
+ * document, and an appeal ruling may quote the lower court's marker earlier.
+ */
+export function findOperative(text: string): number {
+  let at = -1;
+  for (const m of text.matchAll(OPERATIVE)) at = m.index;
+  return at;
+}
 
 export type DocMode = "head" | "operative" | "grep" | "tail";
 
@@ -391,14 +432,16 @@ export async function document(
         "http",
       );
     }
-    if (BLOCK.test(res.body)) {
-      throw new SourceError(
-        "СТОП: реєстр показав блок-сторінку. Обхід не виконується.",
-        "blocked",
-      );
-    }
-    // Not counted against the budget: no document was obtained.
+    // Not counted against the budget: no document was obtained. A block is
+    // checked only here, on a page WITHOUT a decision — a decision's own text
+    // may say «доступ обмежено» (see the note on the search).
     if (!hasDecision(res.body)) {
+      if (BLOCK.test(res.body)) {
+        throw new SourceError(
+          "СТОП: реєстр показав блок-сторінку. Обхід не виконується.",
+          "blocked",
+        );
+      }
       throw new SourceError(
         `За id ${id} реєстр не показав тексту рішення: такого документа немає ` +
           `або доступ до нього обмежено. Це НЕ доказ, що рішення не існує — ` +
@@ -417,9 +460,9 @@ export async function document(
   let note = "";
 
   if (mode === "operative") {
-    const m = OPERATIVE.exec(body);
-    if (m) {
-      text = body.slice(m.index).slice(0, CHUNK);
+    const at = findOperative(body);
+    if (at >= 0) {
+      text = body.slice(at).slice(0, CHUNK);
       note = "Резолютивна частина — те, чим справа закінчилась.";
     } else {
       text = body.slice(-CHUNK);

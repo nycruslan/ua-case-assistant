@@ -110,6 +110,21 @@ export function normalizeNreg(raw: string): string {
 }
 
 /** True only for a date that exists in the calendar: 2025-02-30 is false. */
+/**
+ * Today's date in Kyiv, YYYY-MM-DD.
+ *
+ * ☠️ Not UTC: between 00:00 and 03:00 Kyiv time the UTC date is still
+ * yesterday, so a redaction in force from today read as a future one.
+ */
+export function kyivToday(now = new Date()): string {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Europe/Kyiv",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(now);
+}
+
 export function isRealDate(iso: string): boolean {
   const d = new Date(`${iso}T00:00:00Z`);
   return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === iso;
@@ -235,7 +250,7 @@ export async function getMeta(nreg: string): Promise<RadaMeta> {
     );
   }
 
-  const todayIso = new Date().toISOString().slice(0, 10);
+  const todayIso = kyivToday();
   const all = parseHistory(raw.history ?? "");
   const { past, future } = splitFuture(all, todayIso);
 
@@ -323,7 +338,12 @@ export interface LawText {
  * Verified live: ЦК current text is 1 791 233 bytes, and ed20250101 is
  * 1 717 330 bytes — genuinely different documents, not a silent fallback.
  */
-export async function getText(nreg: string, edDate?: string): Promise<LawText> {
+export async function getText(
+  nreg: string,
+  edDate?: string,
+  /** The act's current redaction, from its metadata — see below. */
+  currentRedaction?: string,
+): Promise<LawText> {
   nreg = normalizeNreg(nreg);
   const ed = edDate ? edDate.replace(/-/g, "") : "";
   if (ed && !/^\d{8}$/.test(ed)) {
@@ -335,11 +355,6 @@ export async function getText(nreg: string, edDate?: string): Promise<LawText> {
   const cacheKey = `text:${nreg}:${ed || "current"}`;
   const cached = await readCache(cacheKey);
 
-  const res = await request("data.rada", {
-    path,
-    ifModifiedSince: cached?.lastModified,
-  });
-
   const result = (body: string, retrievedAt: string, fromCache: boolean) => ({
     body,
     nreg,
@@ -348,8 +363,25 @@ export async function getText(nreg: string, edDate?: string): Promise<LawText> {
     fromCache,
   });
 
+  // ☠️ Every call used to revalidate with the server, spending a 5–7 s polite
+  // pause on a text that had not changed. A past redaction never changes, and
+  // the current one is still current while the act's metadata names the same
+  // redaction the copy holds. Comparing redactions, not dates: a new redaction
+  // can appear on data.rada days after the date it carries.
+  if (cached && (ed || (currentRedaction && cached.redaction === currentRedaction))) {
+    return result(cached.body, cached.fetchedAt, true);
+  }
+
+  const res = await request("data.rada", {
+    path,
+    ifModifiedSince: cached?.lastModified,
+  });
+
   // 304, or any error while a copy is on disk: serve the copy rather than fail.
   if (cached && (res.notModified || res.status !== 200)) {
+    if (res.notModified && !ed && currentRedaction) {
+      await writeCache(cacheKey, { ...cached, redaction: currentRedaction });
+    }
     return result(cached.body, cached.fetchedAt, true);
   }
   if (res.status !== 200) {
@@ -366,6 +398,7 @@ export async function getText(nreg: string, edDate?: string): Promise<LawText> {
     body: res.body,
     lastModified: res.headers["last-modified"],
     fetchedAt,
+    ...(ed ? {} : { redaction: currentRedaction }),
   });
   return result(res.body, fetchedAt, false);
 }
@@ -531,9 +564,11 @@ export interface UnitIndex {
    */
   excluded: Map<string, string>;
   lines: string[];
+  /** The date the text is read for — decides whether struck-down text still applies. */
+  refDate: string;
 }
 
-export function buildIndex(text: string): UnitIndex {
+export function buildIndex(text: string, refDate = kyivToday()): UnitIndex {
   // ☠️ data.rada serves CRLF. Splitting on "\n" alone leaves a trailing \r on
   // every line, which then rides into a norm quoted in a court filing — and it
   // also breaks an exact structural match, since «Глава 4\r» is not «Глава 4».
@@ -557,7 +592,7 @@ export function buildIndex(text: string): UnitIndex {
       structural.push({ label: raw.trim(), line: i });
     }
   });
-  return { articles, structural, excluded, lines };
+  return { articles, structural, excluded, lines, refDate };
 }
 
 export interface UnitOccurrence {
@@ -573,6 +608,10 @@ export interface UnitOccurrence {
   context: string;
   /** Set when `text` was cut at MAX_UNIT_CHARS; `charCount` is the full size. */
   truncated?: boolean;
+  /** Parts the Constitutional Court struck down. See `strikeDown`. */
+  unconstitutional?: Unconstitutional[];
+  /** For a «ч. N ст. M» address: what was narrowed, or why it was not. */
+  partNote?: string;
 }
 
 export interface UnitResult {
@@ -661,6 +700,8 @@ function normNum(n: string): string {
  */
 export function sliceUnit(index: UnitIndex, unit: string): UnitResult {
   const spec = plainDashes(unit).trim();
+  const part = partAddress(spec);
+  if (part) return slicePart(index, part);
   const point = POINT.exec(spec);
   if (point) return slicePoint(index, spec, point);
   const artMatch = /^(?:ст\.?|стаття|st)?\s*(\d+(?:-\d+)?)$/i.exec(spec);
@@ -732,6 +773,69 @@ export function sliceUnit(index: UnitIndex, unit: string): UnitResult {
   };
 }
 
+/**
+ * «ч. 2 ст. 284», «частина 2 статті 284», «п. 1 ч. 2 ст. 284», «ст. 284 ч. 2» —
+ * how lawyers cite. Undefined for anything else.
+ */
+export function partAddress(
+  spec: string,
+): { article: string; part: string; point?: string } | undefined {
+  const s = spec.toLowerCase().replace(/\s+/g, " ").trim();
+  const art = /(?:^|[\s,])(?:ст\.?|статт[яі])\s*(\d+(?:-\d+)?)(?=$|[\s,])/u.exec(s);
+  const prt = /(?:^|[\s,])(?:ч\.?|частин[аи])\s*(\d+(?:-\d+)?)(?=$|[\s,])/u.exec(s);
+  if (!art || !prt) return undefined;
+  const pnt = /(?:^|[\s,])(?:п\.?|пункт)\s*(\d+(?:-\d+)?)(?=$|[\s,])/u.exec(s);
+  // Nothing else may be in the address, or it is not this kind of address.
+  const rest = [art, prt, pnt].reduce((acc, m) => (m ? acc.replace(m[0], " ") : acc), s);
+  if (rest.replace(/[\s,]/g, "")) return undefined;
+  return { article: art[1], part: prt[1], point: pnt?.[1] };
+}
+
+/**
+ * A part (and optionally a point) of an article. The article is sliced as
+ * usual, then narrowed: a part runs from «N. » to the next numbered part, a
+ * point from «K) » to the next point. If the part is not there, the whole
+ * article comes back with a note, never «not found» for an article that exists.
+ */
+function slicePart(
+  index: UnitIndex,
+  addr: { article: string; part: string; point?: string },
+): UnitResult {
+  const whole = sliceUnit(index, addr.article);
+  if (!whole.found) return whole;
+  const label = `${addr.point ? `п. ${addr.point} ` : ""}ч. ${addr.part} ст. ${addr.article}`;
+  const narrow = (text: string, startRe: RegExp, nextRe: RegExp) => {
+    const lines = text.split("\n");
+    const from = lines.findIndex((l) => startRe.test(l));
+    if (from < 0) return undefined;
+    let to = lines.length;
+    for (let k = from + 1; k < lines.length; k++) {
+      if (nextRe.test(lines[k])) {
+        to = k;
+        break;
+      }
+    }
+    return lines.slice(from, to).join("\n").trim();
+  };
+  const esc = (n: string) => n.replace(/-/g, "-?");
+  return {
+    ...whole,
+    unit: label,
+    occurrences: whole.occurrences.map((o) => {
+      const partText = narrow(o.text, new RegExp(`^${esc(addr.part)}\\.\\s`), /^\d+(?:-\d+)?\.\s/);
+      const pointText =
+        partText && addr.point
+          ? narrow(partText, new RegExp(`^${esc(addr.point)}\\)\\s`), /^\d+(?:-\d+)?\)\s/)
+          : undefined;
+      const narrowed = pointText ?? partText;
+      if (!narrowed || (addr.point && !pointText)) {
+        return { ...o, partNote: `${label}: такої частини чи пункту в тексті не знайдено — показано всю статтю.` };
+      }
+      return { ...o, text: `${o.heading}\n${narrowed}`, partNote: `Показано лише ${label}; повний текст — unit «${addr.article}».` };
+    }),
+  };
+}
+
 /** Structural headings matching a user's address, best match first. */
 function findHeadings(index: UnitIndex, spec: string): { label: string; line: number }[] {
   // ☠️ Exact match first. Plain prefix matching made «Глава 4» also match
@@ -742,7 +846,12 @@ function findHeadings(index: UnitIndex, spec: string): { label: string; line: nu
   let pool = byHeading([needle]);
   if (pool.length === 0) pool = byHeading(headingVariants(needle));
   if (pool.length === 0) {
-    pool = index.structural.filter((s) => normHeading(s.label).startsWith(needle));
+    // ☠️ Only up to a boundary: «Глава 1» must not also take «Глава 10»–«19»,
+    // and «Розділ I» must not take «Розділ II». Measured on КПК: 11 chapters.
+    pool = index.structural.filter((s) => {
+      const label = normHeading(s.label);
+      return label.startsWith(needle) && !/[\p{L}\p{N}]/u.test(label.charAt(needle.length));
+    });
   }
   // «п. 19 Прикінцевих положень» names the section by its subject, in any case
   // ending, so match the final-provisions heading by that subject.
@@ -899,6 +1008,77 @@ function extractAt(
 }
 
 /** Lines [start, end) as a quotable occurrence, cut to this answer's share of the budget. */
+export interface Unconstitutional {
+  /** The provision's own words, without the registry's marker (first 300 chars). */
+  text: string;
+  marker: string;
+  /** The date it stops (or stopped) applying; null when the marker does not say. */
+  lostForceOn: string | null;
+  /** Only one aspect was struck down («в тім, що…», «а саме…»). */
+  partial: boolean;
+  /** On the date the text is read for; null when that cannot be told. */
+  inForce: boolean | null;
+}
+
+const STRUCK = /\/\*([\s\S]*?)\*\//g;
+const KSU_DATE = /Конституційного\s+Суду[^{}]*?від\s+(\d{2})\.(\d{2})\.(\d{4})/u;
+const DELAYED = /[ув]трачає\s+чинність\s+через\s+(\S+)\s+місяц/u;
+const AT_ONCE = /[ув]трачає\s+чинність\s+(?:з|із|зі)\s+дня\s+ухвалення/u;
+const PARTIAL = /в\s+тім,\s+що|а\s+саме|^\{\s*Положення\s/u;
+const MONTH_WORDS: Record<string, number> = {
+  "один": 1, "одного": 1, "два": 2, "двох": 2, "три": 3, "трьох": 3,
+  "чотири": 4, "чотирьох": 4, "п'ять": 5, "п'яти": 5, "шість": 6, "шести": 6,
+  "дев'ять": 9, "дев'яти": 9, "дванадцять": 12, "дванадцяти": 12,
+};
+
+function addMonths(iso: string, months: number): string {
+  const [y, m, d] = iso.split("-").map(Number);
+  return new Date(Date.UTC(y, m - 1 + months, d)).toISOString().slice(0, 10);
+}
+
+/**
+ * Handle the official text's `/* … *\/`: a provision the Constitutional Court
+ * declared unconstitutional, with the decision in a `{…}` marker inside.
+ *
+ * ☠️ It used to reach the quotable `text` as if it were law. But «struck down»
+ * does not mean «gone today»: the decision usually takes effect three or six
+ * months later (КПК ст. 616 still applied in October 2026 under a July ruling),
+ * and «в тім, що…» strikes down only one aspect. So the date comes from the
+ * marker: text that no longer applies leaves `text`, everything else stays,
+ * and every such part is reported with its date and scope.
+ */
+export function strikeDown(
+  raw: string,
+  refDate: string,
+): { text: string; items: Unconstitutional[] } {
+  const items: Unconstitutional[] = [];
+  const text = raw.replace(STRUCK, (_, inner: string) => {
+    const marker = (/\{[^{}]*\}/.exec(inner)?.[0] ?? "").replace(APOSTROPHES, "'");
+    const words = inner.replace(/\{[^{}]*\}/g, " ").replace(/\s+/g, " ").trim();
+    const decided = KSU_DATE.exec(marker);
+    const decidedOn = decided ? `${decided[3]}-${decided[2]}-${decided[1]}` : null;
+    const delay = DELAYED.exec(marker);
+    const months = delay ? MONTH_WORDS[delay[1]] ?? (Number(delay[1]) || undefined) : undefined;
+    const lostForceOn = !decidedOn
+      ? null
+      : months
+        ? addMonths(decidedOn, months)
+        : AT_ONCE.test(marker)
+          ? decidedOn
+          : null;
+    const partial = PARTIAL.test(marker);
+    const inForce = lostForceOn ? refDate < lostForceOn : null;
+    items.push({ text: words.slice(0, 300), marker, lostForceOn, partial, inForce });
+    if (inForce === false && !partial) {
+      const lead = /^\d+(?:-\d+)?\.\s/.exec(words)?.[0] ?? "";
+      const [y, m, d] = lostForceOn!.split("-");
+      return `${lead}[визнано неконституційним, не діє з ${d}.${m}.${y} — див. unconstitutional]`;
+    }
+    return inner;
+  });
+  return { text, items };
+}
+
 function sliceRange(
   index: UnitIndex,
   start: number,
@@ -907,7 +1087,8 @@ function sliceRange(
 ): UnitOccurrence & { raw: string } {
   const { lines } = index;
   const rawText = lines.slice(start, end).join("\n").trim();
-  const split = splitMarkers(rawText);
+  const struck = strikeDown(rawText, index.refDate);
+  const split = splitMarkers(struck.text);
   // ☠️ The budget is per ANSWER, not per occurrence: three «Розділ I» capped
   // separately still summed to ~26k tokens, over Claude Code's hard limit.
   const budget = Math.floor(MAX_UNIT_CHARS / sharing);
@@ -932,6 +1113,7 @@ function sliceRange(
     context,
     raw: rawText,
     ...(truncated ? { truncated } : {}),
+    ...(struck.items.length ? { unconstitutional: struck.items } : {}),
   };
 }
 

@@ -32,6 +32,7 @@ async function call(path: string, body?: unknown): Promise<unknown> {
       `ЛПД: HTTP ${res.status} на ${path}. Практику НЕ перевірено — ` +
         `не відповідай з пам'яті.`,
       "http",
+      res.status,
     );
   }
   try {
@@ -94,11 +95,22 @@ export async function searchPositions(
   query: string,
   semantic = false,
 ): Promise<SearchResult> {
-  const payload = await call("/search/text", {
-    query,
-    aiEnabled: semantic,
-    comment: null,
-  });
+  let payload: unknown;
+  let fallbackNote = "";
+  try {
+    payload = await call("/search/text", { query, aiEnabled: semantic, comment: null });
+  } catch (err) {
+    // ☠️ The semantic engine fails on its own (measured 2026-10-10: HTTP 502
+    // twice, while the lexical search of the same words returned 50). A server
+    // error there must not end the search: fall back to the lexical one.
+    const serverError = err instanceof SourceError && (err.status ?? 0) >= 500;
+    if (!semantic || !serverError) throw err;
+    payload = await call("/search/text", { query, aiEnabled: false, comment: null });
+    semantic = false;
+    fallbackNote =
+      `Семантичний пошук ЛПД не відповів (HTTP ${(err as SourceError).status}), ` +
+      `тому показано звичайний пошук тих самих слів. `;
+  }
   const raw = items(payload);
   const stems = semantic ? [] : queryStems(query);
 
@@ -134,6 +146,7 @@ export async function searchPositions(
       positions: [],
       semantic,
       note:
+        fallbackNote +
         "Жодна з позицій, які повернула ЛПД, не містить слів запиту — це не " +
         "результати пошуку, а добірка, яку база віддає, коли нічого не знайшла. " +
         "Спробуй інше формулювання або semantic=true. Це НЕ «практики немає».",
@@ -144,7 +157,8 @@ export async function searchPositions(
     positions,
     semantic,
     note:
-      positions.length === 0
+      fallbackNote +
+      (positions.length === 0
         ? "0 позицій. Це НЕ «практики немає» — спробуй інше формулювання, " +
           "семантичний пошук (semantic=true), дайджести ВС і ЄДРСР."
         : (semantic
@@ -154,7 +168,7 @@ export async function searchPositions(
             : "") +
           "Це фрагменти для відбору — повний текст позиції дає lpd_position. " +
           "Цитуй ПОСТАНОВУ, до якої прив'язана позиція, а не саму ЛПД. " +
-          "Перевір, чи не було відступу від цієї позиції.",
+          "Перевір, чи не було відступу від цієї позиції."),
   };
 }
 
