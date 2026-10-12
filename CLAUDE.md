@@ -48,7 +48,12 @@ Ukrainian. Started in Claude Cowork on 2026-09-20, developed in Claude Code sinc
   client spawns a server without a login shell, so `node` is not on PATH when it comes from a version
   manager. Do not "simplify" either one back to `"command": "node"` — that fails with ENOENT. The shipped
   one lives in `scripts/`, not `bin/`, because a plugin's top-level `bin/` cannot be distributed through
-  claude.ai organization settings.
+  claude.ai organization settings. The plugin's `.mcp.json` runs it directly as `command` (keep its
+  executable bit) and has no `env`: Anthropic's directory refuses any variable but `${CLAUDE_PLUGIN_ROOT}`
+  there and holds a server started through `sh`. `npm run check-plugin` enforces both.
+- The server has no runtime dependencies: `src/mcp.ts` implements the MCP stdio protocol for tools. Keep it
+  that way — the directory inspects only readable files under 256 KiB, and the SDK alone exceeded that.
+  `@modelcontextprotocol/sdk` stays a dev dependency, used by the tests as the reference client.
 - After changing either `.mcp.json`: `npm run check-config` (dev) and `npm run check-plugin` (shipped).
 - Editing the server's source does not affect the running one: Claude Code spawns it at startup, so reload
   the app to pick up changes.

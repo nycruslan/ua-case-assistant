@@ -46,12 +46,6 @@ if [ "$MAJOR" -lt 24 ]; then
   exit 1
 fi
 
-# A fresh clone has no dependencies yet. Without this check Node throws
-# ERR_MODULE_NOT_FOUND, and an MCP client shows only "server failed to connect".
-if [ ! -d "$DIR/node_modules/@modelcontextprotocol" ]; then
-  echo "ua-legal-sources: dependencies are not installed." >&2
-  echo "  Run:  cd '$DIR' && npm install" >&2
-  exit 1
-fi
-
+# The server imports only Node's own modules, so a fresh clone runs without
+# `npm install`; dependencies are for the tests and the build.
 exec "$NODE" --experimental-strip-types "$DIR/src/index.ts"

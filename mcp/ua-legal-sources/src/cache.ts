@@ -18,18 +18,23 @@ import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 
 /**
- * Where the disk cache lives.
+ * Where the disk cache lives: `UA_LEGAL_CACHE_DIR` if set, else the plugin's
+ * persistent data directory, else `~/.cache/ua-legal-sources`.
  *
- * ☠️ The plugin passes `${CLAUDE_PLUGIN_DATA}/cache`. A client that does not
- * expand the variable hands over that literal string — a relative path, so
- * every write failed silently and every call fetched a whole code again.
- * Anything that is not a usable absolute path falls back to the home cache.
+ * Claude Code exports `CLAUDE_PLUGIN_DATA` to a plugin's MCP server, so the
+ * plugin's `.mcp.json` needs no `env` — and must not have one: the plugin
+ * directory refuses a server config that names any variable but
+ * `${CLAUDE_PLUGIN_ROOT}`. ☠️ A value that is not a usable absolute path (an
+ * unexpanded `${…}`, a relative path) is skipped: writes there failed
+ * silently, and every call fetched a whole code again.
  */
 export function cacheRoot(env: NodeJS.ProcessEnv = process.env): string {
-  const dir = env.UA_LEGAL_CACHE_DIR;
-  return dir && isAbsolute(dir) && !dir.includes("${")
-    ? dir
-    : join(homedir(), ".cache", "ua-legal-sources");
+  const usable = (dir?: string) => (dir && isAbsolute(dir) && !dir.includes("${") ? dir : undefined);
+  const pluginData = usable(env.CLAUDE_PLUGIN_DATA);
+  return (
+    usable(env.UA_LEGAL_CACHE_DIR) ??
+    (pluginData ? join(pluginData, "cache") : join(homedir(), ".cache", "ua-legal-sources"))
+  );
 }
 
 const ROOT = cacheRoot();

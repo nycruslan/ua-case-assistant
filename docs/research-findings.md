@@ -173,6 +173,23 @@ Mac. 16 findings; each re-checked here before fixing. Verified:
   path, but the bundle now ships 1.32.1. `${CLAUDE_SKILL_DIR}` and `allowed-tools` are documented skill
   features; plugin MCP tools are pre-approved as `mcp__plugin_ua-case-assistant_ua-legal-sources__*`.
 
+### Found by validating in Anthropic's directory portal (2026-10-12)
+`claude.ai/directory/manage` → Submit new → Plugin bundle, repo `nycruslan/ua-case-assistant`, path
+`plugins/ua-case-assistant`. First validation: 1 blocking, 3 policy holds, 3 warnings.
+- **Blocking:** `.mcp.json` named `${CLAUDE_PLUGIN_DATA}` in `env`. The directory accepts no variable but
+  `${CLAUDE_PLUGIN_ROOT}` in a server config. Claude Code exports `CLAUDE_PLUGIN_DATA` to the server anyway
+  (code.claude.com/docs/en/plugins-reference), so the server reads it from its environment.
+- **Hold:** files over 256 KiB are not inspected. The bundle was 1.48 MB: zod 850 KiB, ajv 207 KiB, the MCP SDK
+  157 KiB, our code 112 KiB. Even SDK + our code exceeds the limit, so the server now implements the MCP stdio
+  protocol itself (`src/mcp.ts`, zero runtime dependencies) and ships at ~130 KiB.
+- **Hold:** a server started through `sh <script>`; the command is now the script file itself.
+- **Hold that remains while the plugin is a subfolder:** a launcher that uses variables other than
+  `${CLAUDE_PLUGIN_ROOT}`, command substitution, or runs another file is held for a reviewer. The launcher must
+  do all three to find Node, so it is explained to the reviewer rather than removed.
+- **Warning:** no icon; only the *first* save or submission sets the listing icon, so it was added before
+  submitting (`.claude-plugin/icon.png`, 1024×1024).
+- claude.ai chat does not run local MCP servers; the portal marks the plugin «not on claude.ai» for its tools.
+
 ### Engineering findings that cost real debugging time
 - **Superseded diagnosis, kept as a warning:** roughly a third of Node requests to data.rada died with
   `ECONNRESET` while curl never failed. It was first blamed on connection pooling, and a fresh

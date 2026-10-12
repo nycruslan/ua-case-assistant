@@ -12,6 +12,8 @@ cases/
 *.jpg
 *.jpeg
 *.png
+# …except the plugin's listing icon
+!plugins/ua-case-assistant/.claude-plugin/icon.png
 *.heic
 *.m4a
 *.mp3

@@ -1,6 +1,6 @@
 {
   "name": "ua-legal-sources",
-  "version": "0.6.2",
+  "version": "0.7.0",
   "description": "Local MCP server for Ukrainian legal sources (data.rada, ЄДРСР, ЛПД ВС).",
   "scripts": {
     "test": "node --experimental-strip-types --test test/*.test.ts",
@@ -13,11 +13,8 @@
   },
   "license": "Apache-2.0",
   "type": "module",
-  "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.32.1",
-    "zod": "^4.6.6"
-  },
   "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.1",
     "@types/node": "^26.6.5",
     "esbuild": "^0.28.2",
     "typescript": "^7.0.2"

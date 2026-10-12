@@ -19,10 +19,9 @@
  * fires no request at all until the CAPTCHA is solved). Solving or bypassing it
  * is off the table, so case status stays a human step — see README.
  */
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { z } from "zod";
 import pkg from "../package.json" with { type: "json" };
+
+import { serve, type ObjectSchema, type PropertySchema, type Tool, type ToolResult } from "./mcp.ts";
 
 import { SourceError } from "./http.ts";
 import {
@@ -44,19 +43,13 @@ import {
 import * as lpd from "./lpd.ts";
 import * as edrsr from "./edrsr.ts";
 
-const server = new McpServer(
-  // One version for the plugin and its server; check-plugin enforces it.
-  { name: "ua-legal-sources", version: pkg.version },
-  {
-    instructions:
-      "Українські правові джерела з локальної машини. Використовуй ці " +
-      "інструменти замість web fetch: rada_* для законодавства (офіційне API " +
-      "data.rada.gov.ua), lpd_* для правових позицій ВС, edrsr_* для реєстру " +
-      "судових рішень. Ніколи не цитуй норму з пам'яті. Порожній результат " +
-      "означає «я не знайшов», а не «цього не існує». Стану справи " +
-      "(чи набрало рішення сили) тут немає — court.gov.ua/fair під reCAPTCHA.",
-  },
-);
+const INSTRUCTIONS =
+  "Українські правові джерела з локальної машини. Використовуй ці " +
+  "інструменти замість web fetch: rada_* для законодавства (офіційне API " +
+  "data.rada.gov.ua), lpd_* для правових позицій ВС, edrsr_* для реєстру " +
+  "судових рішень. Ніколи не цитуй норму з пам'яті. Порожній результат " +
+  "означає «я не знайшов», а не «цього не існує». Стану справи " +
+  "(чи набрало рішення сили) тут немає — court.gov.ua/fair під reCAPTCHA.";
 
 const now = () => new Date().toISOString();
 
@@ -66,12 +59,31 @@ const now = () => new Date().toISOString();
  * input turned a 20 000-character case number into ~8k tokens of reply. The
  * limits sit far above any real title, query or case number.
  */
-const NREG = z.string().min(2).max(64);
-const ID = z.string().regex(/^\d{1,12}$/);
+const text = (rule: Omit<PropertySchema, "type">): PropertySchema => ({ type: "string", ...rule });
+const NREG = (description: string) => text({ minLength: 2, maxLength: 64, description });
+const ID = (description?: string) => text({ pattern: "^\\d{1,12}$", ...(description ? { description } : {}) });
+const ISO_DATE = (description?: string) =>
+  text({ pattern: "^\\d{4}-\\d{2}-\\d{2}$", ...(description ? { description } : {}) });
 /** ЄДРСР's own format is DD.MM.YYYY; ISO is accepted and converted. */
-const COURT_DATE = z
-  .string()
-  .regex(/^(\d{2}\.\d{2}\.\d{4}|\d{4}-\d{2}-\d{2})$/, "DD.MM.YYYY або YYYY-MM-DD");
+const COURT_DATE = text({
+  pattern: "^(\\d{2}\\.\\d{2}\\.\\d{4}|\\d{4}-\\d{2}-\\d{2})$",
+  description: "DD.MM.YYYY (YYYY-MM-DD теж приймається)",
+});
+const schema = (properties: Record<string, PropertySchema>, required: string[] = []): ObjectSchema => ({
+  type: "object",
+  properties,
+  ...(required.length ? { required } : {}),
+});
+
+const tools: Tool[] = [];
+/** Every tool here only reads, from sources outside this machine. */
+function tool<A>(def: Omit<Tool, "handler" | "annotations"> & { handler: (args: A) => Promise<ToolResult> }) {
+  tools.push({
+    ...def,
+    annotations: { readOnlyHint: true, openWorldHint: true },
+    handler: def.handler as (args: Record<string, unknown>) => Promise<ToolResult>,
+  });
+}
 
 /**
  * Every tool returns text; errors are returned as content, not thrown.
@@ -275,50 +287,47 @@ function beforeExisted(nreg: string, title: string, date: string, first: string)
 
 // ──────────────────────────────────────────────────────── legislation tools
 
-server.registerTool(
-  "rada_resolve",
-  {
-    title: "Знайти акт за назвою або абревіатурою",
-    description:
-      "Перетворює назву чи абревіатуру акта («КУпАП», «ЦК», «Про мобілізаційну " +
-      "підготовку та мобілізацію») на системний номер (nreg) і відкидає " +
-      "архівні «двійники», які мають стан «Чинний», але містять застарілі " +
-      "норми. Повертає обраний акт і всіх кандидатів із реквізитами. " +
-      "Якщо реєстр не дав однозначної відповіді — прямо про це каже.",
-    inputSchema: {
-      name: z
-        .string()
-        .min(2)
-        .max(300)
-        .describe(
+tool<{ name: string }>({
+  name: "rada_resolve",
+  title: "Знайти акт за назвою або абревіатурою",
+  description:
+    "Перетворює назву чи абревіатуру акта («КУпАП», «ЦК», «Про мобілізаційну " +
+    "підготовку та мобілізацію») на системний номер (nreg) і відкидає " +
+    "архівні «двійники», які мають стан «Чинний», але містять застарілі " +
+    "норми. Повертає обраний акт і всіх кандидатів із реквізитами. " +
+    "Якщо реєстр не дав однозначної відповіді — прямо про це каже.",
+  inputSchema: schema(
+    {
+      name: text({
+        minLength: 2,
+        maxLength: 300,
+        description:
           "Абревіатура («КУпАП») або початок офіційної назви («Про …»). " +
-            "Опис замість назви не працює.",
-        ),
+          "Опис замість назви не працює.",
+      }),
     },
-    annotations: { readOnlyHint: true, openWorldHint: true },
-  },
-  budgeted("rada_resolve", async ({ name }) =>
+    ["name"],
+  ),
+  handler: budgeted("rada_resolve", async ({ name }) =>
     guard(async () => {
       const r = await resolve(name);
       return { ...r, retrieved_at: now(), act_vs_article: RADA_STATUS_NOTE };
     })),
-);
+});
 
-server.registerTool(
-  "rada_status",
-  {
-    title: "Чинність акта, поточна і майбутня редакція",
-    description:
-      "Стан акта за офіційною карткою (словом, не кодом), поточна редакція, " +
-      "підстава, кількість редакцій і ПОПЕРЕДЖЕННЯ про вже ухвалені майбутні " +
-      "редакції (зокрема ті, що набирають сили «пізніше», за подією). " +
-      "Стан акта ≠ стан статті: перевіряй одиницю через rada_unit.",
-    inputSchema: {
-      nreg: NREG.describe("Системний номер, напр. «435-15», «8073-10», «254к/96-вр»."),
-    },
-    annotations: { readOnlyHint: true, openWorldHint: true },
-  },
-  budgeted("rada_status", async ({ nreg }) =>
+tool<{ nreg: string }>({
+  name: "rada_status",
+  title: "Чинність акта, поточна і майбутня редакція",
+  description:
+    "Стан акта за офіційною карткою (словом, не кодом), поточна редакція, " +
+    "підстава, кількість редакцій і ПОПЕРЕДЖЕННЯ про вже ухвалені майбутні " +
+    "редакції (зокрема ті, що набирають сили «пізніше», за подією). " +
+    "Стан акта ≠ стан статті: перевіряй одиницю через rada_unit.",
+  inputSchema: schema(
+    { nreg: NREG("Системний номер, напр. «435-15», «8073-10», «254к/96-вр».") },
+    ["nreg"],
+  ),
+  handler: budgeted("rada_status", async ({ nreg }) =>
     guard(async () => {
       const meta = await getMeta(nreg);
       const card = await getCard(nreg);
@@ -350,41 +359,33 @@ server.registerTool(
         note: RADA_STATUS_NOTE,
       };
     })),
-);
+});
 
-server.registerTool(
-  "rada_unit",
-  {
-    title: "Текст статті або іншої одиниці акта",
-    description:
-      "Дослівний текст однієї статті, розділу, глави, підрозділу чи параграфа. " +
-      "Приймає «130», «ст.130», «1270», «111-1», «ч. 2 ст. 284», «п. 1 ч. 2 ст. 284», " +
-      "«Розділ IV», «Підрозділ 1», «Прикінцеві та перехідні положення п. 19». " +
-      "Окремо позначає, що статтю ВИКЛЮЧЕНО, і яким законом. Службові " +
-      "позначки про зміни у {фігурних дужках} віддаються окремо від тексту " +
-      "норми, щоб вони не потрапили в цитату. Параметр date дає редакцію " +
-      "станом на дату. Повертає МАСИВ occurrences: якщо ambiguous=true, під цим " +
-      "номером в акті є кілька різних статей (надрядкові номери в текстовому " +
-      "експорті друкуються як звичайні) — тоді не вибирай сам, покажи обидві.",
-    inputSchema: {
-      nreg: NREG.describe("Системний номер акта, напр. «8073-10»."),
-      unit: z
-        .string()
-        .min(1)
-        .max(100)
-        .describe("Номер статті або назва структурної одиниці."),
-      date: z
-        .string()
-        .regex(/^\d{4}-\d{2}-\d{2}$/)
-        .optional()
-        .describe(
-          "YYYY-MM-DD — текст у редакції, чинній на цю дату. " +
-            "Обов'язковий, коли питання стосується минулих подій.",
-        ),
+tool<{ nreg: string; unit: string; date?: string }>({
+  name: "rada_unit",
+  title: "Текст статті або іншої одиниці акта",
+  description:
+    "Дослівний текст однієї статті, розділу, глави, підрозділу чи параграфа. " +
+    "Приймає «130», «ст.130», «1270», «111-1», «ч. 2 ст. 284», «п. 1 ч. 2 ст. 284», " +
+    "«Розділ IV», «Підрозділ 1», «Прикінцеві та перехідні положення п. 19». " +
+    "Окремо позначає, що статтю ВИКЛЮЧЕНО, і яким законом. Службові " +
+    "позначки про зміни у {фігурних дужках} віддаються окремо від тексту " +
+    "норми, щоб вони не потрапили в цитату. Параметр date дає редакцію " +
+    "станом на дату. Повертає МАСИВ occurrences: якщо ambiguous=true, під цим " +
+    "номером в акті є кілька різних статей (надрядкові номери в текстовому " +
+    "експорті друкуються як звичайні) — тоді не вибирай сам, покажи обидві.",
+  inputSchema: schema(
+    {
+      nreg: NREG("Системний номер акта, напр. «8073-10»."),
+      unit: text({ minLength: 1, maxLength: 100, description: "Номер статті або назва структурної одиниці." }),
+      date: ISO_DATE(
+        "YYYY-MM-DD — текст у редакції, чинній на цю дату. " +
+          "Обов'язковий, коли питання стосується минулих подій.",
+      ),
     },
-    annotations: { readOnlyHint: true, openWorldHint: true },
-  },
-  budgeted("rada_unit", async ({ nreg, unit, date }) =>
+    ["nreg", "unit"],
+  ),
+  handler: budgeted("rada_unit", async ({ nreg, unit, date }) =>
     guard(async () => {
       const t = await textAsOf(nreg, date);
       const { meta } = t;
@@ -482,29 +483,25 @@ server.registerTool(
         from_cache: text.fromCache,
       };
     })),
-);
+});
 
-server.registerTool(
-  "rada_list_units",
-  {
-    title: "Перелік одиниць акта (зміст)",
-    description:
-      "Назви статей і структурних одиниць акта, з фільтром. Найдешевший спосіб " +
-      "знайти, у якій саме одиниці живе потрібне питання, коли номер невідомий: " +
-      "в українських кодексах назва статті майже завжди описує її предмет. " +
-      "Фільтр «виключено» показує виключені статті.",
-    inputSchema: {
-      nreg: NREG,
-      filter: z
-        .string()
-        .max(200)
-        .optional()
-        .describe("Підрядок для фільтрування назв, напр. «спадщин», «виключено»."),
-      date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+tool<{ nreg: string; filter?: string; date?: string }>({
+  name: "rada_list_units",
+  title: "Перелік одиниць акта (зміст)",
+  description:
+    "Назви статей і структурних одиниць акта, з фільтром. Найдешевший спосіб " +
+    "знайти, у якій саме одиниці живе потрібне питання, коли номер невідомий: " +
+    "в українських кодексах назва статті майже завжди описує її предмет. " +
+    "Фільтр «виключено» показує виключені статті.",
+  inputSchema: schema(
+    {
+      nreg: NREG("Системний номер акта."),
+      filter: text({ maxLength: 200, description: "Підрядок для фільтрування назв, напр. «спадщин», «виключено»." }),
+      date: ISO_DATE(),
     },
-    annotations: { readOnlyHint: true, openWorldHint: true },
-  },
-  budgeted("rada_list_units", async ({ nreg, filter, date }) =>
+    ["nreg"],
+  ),
+  handler: budgeted("rada_list_units", async ({ nreg, filter, date }) =>
     guard(async () => {
       const t = await textAsOf(nreg, date);
       if (!t.text) {
@@ -560,30 +557,27 @@ server.registerTool(
         from_cache: text.fromCache,
       };
     })),
-);
+});
 
 // ─────────────────────────────────────────────────────── court practice (ЛПД)
 
-server.registerTool(
-  "lpd_search",
-  {
-    title: "Правові позиції Верховного Суду",
-    description:
-      "Пошук у базі правових позицій ВС (lpd.court.gov.ua). semantic=true " +
-      "вмикає семантичний пошук — найкращий вхід у судову практику України. " +
-      "Порожній результат не означає відсутності практики. Цитувати треба " +
-      "постанову, до якої прив'язана позиція, а не саму базу.",
-    inputSchema: {
-      query: z.string().min(3).max(500).describe("Запит українською."),
-      semantic: z
-        .boolean()
-        .optional()
-        .describe("true — семантичний пошук (aiEnabled). За замовчуванням false."),
-      limit: z.number().int().min(1).max(50).optional(),
+tool<{ query: string; semantic?: boolean; limit?: number }>({
+  name: "lpd_search",
+  title: "Правові позиції Верховного Суду",
+  description:
+    "Пошук у базі правових позицій ВС (lpd.court.gov.ua). semantic=true " +
+    "вмикає семантичний пошук — найкращий вхід у судову практику України. " +
+    "Порожній результат не означає відсутності практики. Цитувати треба " +
+    "постанову, до якої прив'язана позиція, а не саму базу.",
+  inputSchema: schema(
+    {
+      query: text({ minLength: 3, maxLength: 500, description: "Запит українською." }),
+      semantic: { type: "boolean", description: "true — семантичний пошук (aiEnabled). За замовчуванням false." },
+      limit: { type: "integer", minimum: 1, maximum: 50 },
     },
-    annotations: { readOnlyHint: true, openWorldHint: true },
-  },
-  budgeted("lpd_search", async ({ query, semantic, limit }) =>
+    ["query"],
+  ),
+  handler: budgeted("lpd_search", async ({ query, semantic, limit }) =>
     guard(async () => {
       const r = await lpd.searchPositions(query, semantic ?? false);
       return {
@@ -596,78 +590,64 @@ server.registerTool(
         retrieved_at: now(),
       };
     })),
-);
+});
 
-server.registerTool(
-  "lpd_position",
-  {
-    title: "Одна правова позиція ВС повністю",
-    description:
-      "Повний текст правової позиції ВС за її id, разом із прив'язаним " +
-      "документом. Перед використанням перевір, чи не було відступу від неї.",
-    inputSchema: { id: ID },
-    annotations: { readOnlyHint: true, openWorldHint: true },
-  },
-  budgeted("lpd_position", async ({ id }) =>
+tool<{ id: string }>({
+  name: "lpd_position",
+  title: "Одна правова позиція ВС повністю",
+  description:
+    "Повний текст правової позиції ВС за її id, разом із прив'язаним " +
+    "документом. Перед використанням перевір, чи не було відступу від неї.",
+  inputSchema: schema({ id: ID() }, ["id"]),
+  handler: budgeted("lpd_position", async ({ id }) =>
     guard(async () => ({
       id,
       position: await lpd.position(id),
       source_url: `${lpd.SITE}/legal-position/${id}`,
       retrieved_at: now(),
     }))),
-);
+});
 
-server.registerTool(
-  "lpd_digest_search",
-  {
-    title: "Огляди (дайджести) практики ВС",
-    description:
-      "Пошук в офіційних оглядах практики ВС із посиланням на PDF і сторінку. " +
-      "Огляд — узагальнення самого суду, але НЕ джерело права: для аргументу " +
-      "цитуй постанову, на яку огляд посилається.",
-    inputSchema: { query: z.string().min(3).max(500) },
-    annotations: { readOnlyHint: true, openWorldHint: true },
-  },
-  budgeted("lpd_digest_search", async ({ query }) =>
+tool<{ query: string }>({
+  name: "lpd_digest_search",
+  title: "Огляди (дайджести) практики ВС",
+  description:
+    "Пошук в офіційних оглядах практики ВС із посиланням на PDF і сторінку. " +
+    "Огляд — узагальнення самого суду, але НЕ джерело права: для аргументу " +
+    "цитуй постанову, на яку огляд посилається.",
+  inputSchema: schema({ query: text({ minLength: 3, maxLength: 500 }) }, ["query"]),
+  handler: budgeted("lpd_digest_search", async ({ query }) =>
     guard(async () => ({
       query,
       ...(await lpd.searchDigests(query)),
       retrieved_at: now(),
     }))),
-);
+});
 
 // ───────────────────────────────────────────────────────────── ЄДРСР tools
 
-server.registerTool(
-  "edrsr_search",
-  {
-    title: "Пошук у реєстрі судових рішень (ЄДРСР)",
-    description:
-      "Пошук у ЄДРСР. За номером справи (ЄУН) повертає ВСЮ історію справи " +
-      "через усі інстанції — ЄУН незмінний. Граматика запиту: пробіл = AND, " +
-      "OR/NOT великими, \"фраза\", word* префікс (потрібен для української " +
-      "морфології). Стоп-слова (ОСОБА, АДРЕСА, грн) ігноруються. " +
-      "Ліміт: один пошук на питання. Порожній результат = «я не знайшов».",
-    inputSchema: {
-      expression: z
-        .string()
-        .max(500)
-        .optional()
-        .describe("Текстовий запит, напр. «поновлен* прогул*»."),
-      case_number: z
-        .string()
-        .max(40)
-        .optional()
-        .describe("ЄУН, напр. «522/2588/23». Для кримінальних — 17-цифровий ЄРДР."),
-      reg_number: z.string().max(20).optional(),
-      judge: z.string().max(100).optional().describe("Прізвище судді."),
-      court_code: z.string().max(20).optional(),
-      date_from: COURT_DATE.optional().describe("DD.MM.YYYY (YYYY-MM-DD теж приймається)"),
-      date_to: COURT_DATE.optional().describe("DD.MM.YYYY (YYYY-MM-DD теж приймається)"),
-    },
-    annotations: { readOnlyHint: true, openWorldHint: true },
-  },
-  budgeted("edrsr_search", async (args) =>
+tool<{ expression?: string; case_number?: string; reg_number?: string; judge?: string; court_code?: string; date_from?: string; date_to?: string }>({
+  name: "edrsr_search",
+  title: "Пошук у реєстрі судових рішень (ЄДРСР)",
+  description:
+    "Пошук у ЄДРСР. За номером справи (ЄУН) повертає ВСЮ історію справи " +
+    "через усі інстанції — ЄУН незмінний. Граматика запиту: пробіл = AND, " +
+    "OR/NOT великими, \"фраза\", word* префікс (потрібен для української " +
+    "морфології). Стоп-слова (ОСОБА, АДРЕСА, грн) ігноруються. " +
+    "Ліміт: один пошук на питання. Порожній результат = «я не знайшов».",
+  inputSchema: schema({
+    expression: text({ maxLength: 500, description: "Текстовий запит, напр. «поновлен* прогул*»." }),
+    case_number: text({
+      maxLength: 40,
+      description: "ЄУН, напр. «522/2588/23». 17-цифровий номер ЄРДР теж можна — його шукає як текст.",
+    }),
+    reg_number: text({ maxLength: 20 }),
+    judge: text({ maxLength: 100, description: "Прізвище судді." }),
+    court_code: text({ maxLength: 20 }),
+    date_from: COURT_DATE,
+    date_to: COURT_DATE,
+  }),
+  handler: budgeted("edrsr_search", async (args) =>
     guard(async () => {
       if (
         !args.expression &&
@@ -700,27 +680,27 @@ server.registerTool(
         retrieved_at: now(),
       };
     })),
-);
+});
 
-server.registerTool(
-  "edrsr_document",
-  {
-    title: "Текст судового рішення з ЄДРСР",
-    description:
-      "Читає один документ ЄДРСР. mode обирає ЯКУ частину, щоб одного запиту " +
-      "вистачило: head — початок; operative — РЕЗОЛЮТИВНА частина, тобто чим " +
-      "справа закінчилась (вона в самому кінці 95-тисячного тексту); " +
-      "grep — згадки слова з контекстом; tail — кінець. Ліміт: 8 унікальних " +
-      "документів на питання; вже завантажені читаються безкоштовно. " +
-      "Документи ЄДРСР не зберігаються на диск.",
-    inputSchema: {
-      id: ID.describe("id документа з edrsr_search."),
-      mode: z.enum(["head", "operative", "grep", "tail"]).optional(),
-      needle: z.string().max(200).optional().describe("Слово для mode=grep."),
+tool<{ id: string; mode?: "head" | "operative" | "grep" | "tail"; needle?: string }>({
+  name: "edrsr_document",
+  title: "Текст судового рішення з ЄДРСР",
+  description:
+    "Читає один документ ЄДРСР. mode обирає ЯКУ частину, щоб одного запиту " +
+    "вистачило: head — початок; operative — РЕЗОЛЮТИВНА частина, тобто чим " +
+    "справа закінчилась (вона в самому кінці 95-тисячного тексту); " +
+    "grep — згадки слова з контекстом; tail — кінець. Ліміт: 8 унікальних " +
+    "документів на питання; вже завантажені читаються безкоштовно. " +
+    "Документи ЄДРСР не зберігаються на диск.",
+  inputSchema: schema(
+    {
+      id: ID("id документа з edrsr_search."),
+      mode: { type: "string", enum: ["head", "operative", "grep", "tail"] },
+      needle: text({ maxLength: 200, description: "Слово для mode=grep." }),
     },
-    annotations: { readOnlyHint: true, openWorldHint: true },
-  },
-  budgeted("edrsr_document", async ({ id, mode, needle }) =>
+    ["id"],
+  ),
+  handler: budgeted("edrsr_document", async ({ id, mode, needle }) =>
     guard(async () => ({
       ...(await edrsr.document(id, mode ?? "head", needle)),
       documents_used: edrsr.docsFetched().length,
@@ -728,7 +708,11 @@ server.registerTool(
       anonymisation: edrsr.ANONYMISATION_NOTE,
       retrieved_at: now(),
     }))),
-);
+});
 
-const transport = new StdioServerTransport();
-await server.connect(transport);
+serve(
+  // One version for the plugin and its server; check-plugin enforces it.
+  { name: "ua-legal-sources", version: pkg.version, instructions: INSTRUCTIONS },
+  tools,
+  (message) => fail(new SourceError(message, "input")),
+);

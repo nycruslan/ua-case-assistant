@@ -37,6 +37,9 @@ test("an unexpanded or relative cache variable falls back to the home cache", as
   assert.equal(cacheRoot({ UA_LEGAL_CACHE_DIR: "${CLAUDE_PLUGIN_DATA}/cache" }), home);
   assert.equal(cacheRoot({ UA_LEGAL_CACHE_DIR: "relative/cache" }), home);
   assert.equal(cacheRoot({ UA_LEGAL_CACHE_DIR: "/data/plugin/cache" }), "/data/plugin/cache");
+  // The plugin's own data directory, which Claude Code exports to the server.
+  assert.equal(cacheRoot({ CLAUDE_PLUGIN_DATA: "/home/u/.claude/plugins/data/x" }), "/home/u/.claude/plugins/data/x/cache");
+  assert.equal(cacheRoot({ CLAUDE_PLUGIN_DATA: "${CLAUDE_PLUGIN_DATA}" }), home);
 });
 
 test("an entry is served from memory when the disk copy is gone", async () => {

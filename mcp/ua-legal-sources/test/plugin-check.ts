@@ -37,6 +37,22 @@ const expand = (s: string) =>
     .replaceAll("${CLAUDE_PLUGIN_ROOT}", pluginRoot)
     .replaceAll("${CLAUDE_PLUGIN_DATA}", pluginData);
 
+// Anthropic's plugin directory refuses a server config that names any variable
+// but ${CLAUDE_PLUGIN_ROOT}, and holds a server started through a shell or from
+// a file it cannot inspect (anything over 256 KiB). Fail here first.
+const configText = JSON.stringify(entry);
+const otherVars = [...configText.matchAll(/\$\{([^}]+)\}/g)].map((m) => m[1]).filter((v) => v !== "CLAUDE_PLUGIN_ROOT");
+if (otherVars.length) throw new Error(`.mcp.json names variables the directory refuses: ${otherVars.join(", ")}`);
+if (!entry.command.startsWith("${CLAUDE_PLUGIN_ROOT}/")) {
+  throw new Error("the server must start as a file inside the plugin, not through a shell");
+}
+const walk = (dir: string): string[] =>
+  readdirSync(dir, { withFileTypes: true }).flatMap((d) =>
+    d.isDirectory() ? walk(join(dir, d.name)) : [join(dir, d.name)],
+  );
+const tooBig = walk(pluginRoot).filter((f) => statSync(f).size > 256 * 1024);
+if (tooBig.length) throw new Error(`files over 256 KiB, held by the directory: ${tooBig.join(", ")}`);
+
 const command = expand(entry.command);
 console.log(`command: ${entry.command}`);
 console.log(`      → ${command}`);
@@ -52,7 +68,7 @@ if (statSync(bundle).mtimeMs < newestSrc) {
     "the bundle is older than src/ — run `npm run build` before shipping",
   );
 }
-console.log(`bundle: ${(statSync(bundle).size / 1024 / 1024).toFixed(2)} MB, newer than src ✓`);
+console.log(`bundle: ${(statSync(bundle).size / 1024).toFixed(0)} KiB, newer than src, directory rules ✓`);
 
 const transport = new StdioClientTransport({
   command,
@@ -62,6 +78,9 @@ const transport = new StdioClientTransport({
   env: {
     HOME: process.env.HOME ?? "",
     PATH: "/usr/bin:/bin",
+    // What Claude Code exports to a plugin's stdio server.
+    CLAUDE_PLUGIN_ROOT: pluginRoot,
+    CLAUDE_PLUGIN_DATA: pluginData,
     ...Object.fromEntries(
       Object.entries(entry.env ?? {}).map(([k, v]) => [k, expand(v)]),
     ),

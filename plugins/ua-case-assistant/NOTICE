@@ -1,0 +1,32 @@
+ua-case-assistant / ua-legal-sources
+Copyright 2026 Ruslan
+
+This product includes software developed as part of the LEXERY Ukrainian Law
+plugin (https://github.com/LEXERY-AI/lexery-ukrainian-law), Copyright LEXERY,
+licensed under the Apache License, Version 2.0.
+
+Specifically, the request details for the following Ukrainian state sources were
+ported from that project's Python scripts into TypeScript:
+
+  - reyestr.court.gov.ua (ЄДРСР)          from skills/ukrainian-court-practice/scripts/edrsr.py
+  - lpd(-api-prod).court.gov.ua (ЛПД ВС)  from skills/ukrainian-court-practice/scripts/lpd.py
+  - zakon.rada.gov.ua name resolver       from skills/ukrainian-legislation/scripts/rada.py
+
+Their measured behaviour of those endpoints — the POST-only ЄДРСР search, the
+inlined CAPTCHA modal, the per-host User-Agent requirements, the query grammar
+traps — is the reason those modules are written the way they are. Attribution is
+also kept inline in the source files that carry ported logic.
+
+---
+
+Legislation texts and document metadata in mcp/ua-legal-sources/test/fixtures/
+are open data published by the Verkhovna Rada of Ukraine open data portal
+(https://data.rada.gov.ua), used under Creative Commons Attribution 4.0
+International (CC BY 4.0). They are excerpts, retained verbatim so that parser
+tests run against the registry's real output rather than an idealised copy.
+
+  Source: Верховна Рада України, Портал відкритих даних, https://data.rada.gov.ua
+  Licence: https://creativecommons.org/licenses/by/4.0/
+
+No court decisions and no personal data from ЄДРСР are included in this
+repository. The ЄДРСР test fixtures are written by hand.

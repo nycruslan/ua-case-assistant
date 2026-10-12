@@ -116,15 +116,16 @@ and [`mcp/ua-legal-sources/README.md`](mcp/ua-legal-sources/README.md).
 
 ## What it runs, sends and stores
 
-- **Runs** one local MCP server, `plugins/ua-case-assistant/mcp/ua-legal-sources.mjs` (Node 20+), bundled from the
-  readable source in `mcp/ua-legal-sources/src`. A small `sh` launcher only locates Node. Nothing is installed or
-  downloaded at run time.
+- **Runs** one local MCP server, `plugins/ua-case-assistant/mcp/ua-legal-sources.mjs` (Node 20+, ~130 KiB, no
+  dependencies), bundled from the readable source in `mcp/ua-legal-sources/src`. A small `sh` launcher only
+  locates Node. Nothing is installed or downloaded at run time.
 - **Connects** over HTTPS to four official Ukrainian state hosts and nothing else: `data.rada.gov.ua` (law texts:
   act number, date), `zakon.rada.gov.ua` (name→number lookup: the act's name), `lpd-api-prod.court.gov.ua`
   (Supreme Court positions: the search text) and `reyestr.court.gov.ua` (court register: search terms, case or
   ЄРДР number, judge, dates). Search terms come from the user's question and may include their case number.
   Case documents never leave the machine. No telemetry, no calls to the author. Honours `HTTPS_PROXY`.
-- **Stores** law texts in `${CLAUDE_PLUGIN_DATA}/cache` (or `~/.cache/ua-legal-sources`); court decisions are
+- **Stores** law texts in the plugin's data directory (`~/.claude/plugins/data/…/cache`, else
+  `~/.cache/ua-legal-sources`); court decisions are
   never written to disk.
 - **Where:** everything works in Claude Code and in Cowork running on your computer; claude.ai chat ignores local
   servers, so there only the skills load and they verify law through the browser.
@@ -142,7 +143,7 @@ is never de-anonymised or linked across documents.
 
 ```bash
 cd mcp/ua-legal-sources && npm install
-npm test              # 94 unit tests on recorded fixtures, no network
+npm test              # 97 unit tests on recorded fixtures, no network
 npm run check-config  # the repo's dev .mcp.json launches the server
 npm run build         # rebuild the bundle the plugin ships
 npm run check-plugin  # the BUNDLED plugin server, spawned as a client would
