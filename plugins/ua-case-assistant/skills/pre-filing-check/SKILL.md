@@ -7,6 +7,7 @@ description: >
   документі", "чи існують ці постанови". It audits every legal citation live, checks facts against the case
   file, checks formal requirements, deadlines, attachments and personal data, and returns a clear verdict for
   the advocate.
+allowed-tools: mcp__plugin_ua-case-assistant_ua-legal-sources__*
 ---
 
 # Перевірка перед поданням

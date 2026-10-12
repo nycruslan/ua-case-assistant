@@ -6,6 +6,7 @@ description: >
   опубліковано рішення", "перевір Електронний суд / пошту суду", "налаштуй моніторинг справи",
   "щотижнева перевірка". It checks the case-status portal, the court decisions register and (if connected)
   e-court notification emails, updates the case files and flags new deadlines.
+allowed-tools: mcp__plugin_ua-case-assistant_ua-legal-sources__*
 ---
 
 # Моніторинг справи

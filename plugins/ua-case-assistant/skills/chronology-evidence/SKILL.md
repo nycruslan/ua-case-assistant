@@ -6,6 +6,7 @@ description: >
   "матриця доказів", "чого бракує з доказів", "чим доведемо", "розбери нові документи", "додай документ у
   справу". It writes CHRONOLOGY.md and EVIDENCE.md with a source reference for every row and lists evidence
   gaps with ways to close them (including advocate requests).
+allowed-tools: Bash(textutil -convert txt -stdout *) Bash(sips -s format jpeg *) Bash(unzip -p *) Bash(afinfo *) Bash(iconv -f cp1251 -t utf-8 *)
 ---
 
 # Хронологія і матриця доказів
@@ -14,8 +15,8 @@ description: >
 
 - Після `case-setup`; щоразу, коли в `00_inbox/` з'являються нові документи; перед аналізом і перед
   складанням будь-якого документа по суті.
-- Нові документи з `00_inbox/`: спершу прочитай і проіндексуй їх за кроком 3 скіла `case-setup` (там
-  сказано, як відкрити кожен формат: HEIC, DOCX, XLSX, EML, аудіо), далі оброби тут.
+- Нові документи з `00_inbox/`: спершу прочитай і проіндексуй їх за кроком 3 скіла `case-setup`. Як
+  відкрити кожен формат (HEIC, DOCX, XLSX, EML, аудіо) — `${CLAUDE_PLUGIN_ROOT}/skills/case-setup/references/reading-files.md`.
 
 ## Хронологія → `CHRONOLOGY.md`
 

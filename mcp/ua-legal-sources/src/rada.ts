@@ -518,13 +518,32 @@ function toRoman(n: number): string {
   return out;
 }
 
-/** Compare structural headings the way a reader would, not byte for byte. */
+/**
+ * A Roman numeral written with any mix of Latin letters and the Cyrillic
+ * look-alikes і and х. Built from code points so no look-alike sits in the source.
+ */
+const CYR_I = String.fromCharCode(0x456);
+const CYR_X = String.fromCharCode(0x445);
+const ROMAN_TOKEN = new RegExp(`(^|\\s)([ivxlcdm${CYR_I}${CYR_X}]+)(?=$|[\\s.:,])`, "gu");
+
+/**
+ * Compare structural headings the way a reader would, not byte for byte.
+ *
+ * ☠️ КПК writes «Розділ I» and «Розділ III» in Latin but «Розділ ІІ» in
+ * Cyrillic, so «Розділ II» as a user types it found nothing — and before the
+ * prefix boundary, it confidently returned «Розділ III». Only standalone numeral
+ * tokens are mapped to Latin: words such as «розділ» and «прикінцеві» contain
+ * a Cyrillic і too, and must keep it for the keyword checks.
+ */
 function normHeading(s: string): string {
   return plainDashes(s)
     .replace(APOSTROPHES, "'")
     .toLowerCase()
     .replace(/\s+/g, " ")
-    .trim();
+    .trim()
+    .replace(ROMAN_TOKEN, (_, space: string, numeral: string) =>
+      space + numeral.replaceAll(CYR_I, "i").replaceAll(CYR_X, "x"),
+    );
 }
 
 /**
@@ -1253,38 +1272,56 @@ export async function resolve(
     };
   }
 
-  const candidates: Candidate[] = [];
+  // Metadata first, for every candidate: it carries the archive flag and the
+  // current redaction, both cheap and both needed to choose.
+  const metas = [];
   for (const nreg of nregs.slice(0, maxCandidates)) {
-    try {
-      const meta = await getMeta(nreg);
-      // An archived twin is rejected on the flag alone. Fetching its card would
-      // spend a request against a rate-limited source only to read «Чинний» —
-      // the very status that makes the twin a trap.
-      const card = meta.isArchive ? undefined : await getCard(nreg);
-      candidates.push({
-        nreg: meta.nreg,
-        title: card?.title || meta.nazva,
-        statusText:
-          card?.statusText ||
-          (meta.isArchive ? "архівна редакція" : `код стану ${meta.statusCode}`),
-        isArchive: meta.isArchive,
-        currentRedaction: meta.currentRedaction,
-        officialNumber: meta.officialNumber,
-        verified: true,
-      });
-    } catch {
-      // Unknown, not "fine". See the note on Candidate.isArchive.
-      candidates.push({
-        nreg,
-        title: "",
-        statusText: "реквізити не отримано",
-        isArchive: null,
-        currentRedaction: "",
-        officialNumber: "",
-        verified: false,
-      });
-    }
+    metas.push(await getMeta(nreg).then((meta) => ({ nreg, meta }), () => ({ nreg, meta: undefined })));
   }
+
+  // ☠️ The card (the status word) is the slow part: one polite-paced request
+  // each. The choice is the NEWEST live candidate, so cards are read newest
+  // first and reading stops at the first one in force — an older candidate's
+  // status cannot change the choice. «КПК» went from 9 requests to 6.
+  const cards = new Map<string, RadaCard | undefined>();
+  const byNewest = metas
+    .filter((m) => m.meta && !m.meta.isArchive)
+    .sort((a, b) => b.meta!.currentRedaction.localeCompare(a.meta!.currentRedaction));
+  for (const { nreg } of byNewest) {
+    const card = await getCard(nreg).catch(() => undefined);
+    cards.set(nreg, card);
+    if (card && !/втратив\s+чинн/i.test(card.statusText)) break;
+  }
+
+  const candidates: Candidate[] = metas.map(({ nreg, meta }) => {
+    const card = cards.get(nreg);
+    // Unknown, not "fine": a candidate without metadata, or whose card was
+    // needed and failed, is never chosen. See the note on Candidate.isArchive.
+    if (!meta || (cards.has(nreg) && !card)) {
+      return {
+        nreg,
+        title: meta?.nazva ?? "",
+        statusText: "реквізити не отримано",
+        isArchive: meta ? meta.isArchive : null,
+        currentRedaction: meta?.currentRedaction ?? "",
+        officialNumber: meta?.officialNumber ?? "",
+        verified: false,
+      };
+    }
+    return {
+      nreg: meta.nreg,
+      title: card?.title || meta.nazva,
+      statusText:
+        card?.statusText ||
+        (meta.isArchive
+          ? "архівна редакція"
+          : "не перевірялось: є новіша чинна редакція"),
+      isArchive: meta.isArchive,
+      currentRedaction: meta.currentRedaction,
+      officialNumber: meta.officialNumber,
+      verified: true,
+    };
+  });
 
   const { chosen, note } = selectAct(candidates);
   return { query: name, chosen, candidates, ambiguous: false, note };

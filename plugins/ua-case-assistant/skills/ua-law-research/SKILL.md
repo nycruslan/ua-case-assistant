@@ -8,6 +8,7 @@ description: >
   "знайди в реєстрі". It defines the verification discipline, how to reach every Ukrainian source (the
   plugin's ua-legal-sources tools first, the browser as fallback) and how to save research notes into the
   case folder.
+allowed-tools: mcp__plugin_ua-case-assistant_ua-legal-sources__*
 ---
 
 # Пошук і перевірка українського права
@@ -81,7 +82,7 @@ description: >
 |---|---|
 | 1. Інструменти `ua-legal-sources` | Помилка `input` — виправ аргумент; `cooldown` — зачекай; «не знайдено» — інше формулювання чи адреса (`rada_list_units`, редакція на дату) |
 | 2. Інструментів немає | Скажи перезапустити застосунок (сервер під'єднується на старті) і запусти `/ua-case-assistant:setup` |
-| 3. Браузер | zakon.rada.gov.ua — URL-шаблони в `references/rada-urls.md`; ЄДРСР і ЛПД — їхні сторінки пошуку (це POST-форми, web fetch їх не пройде). Інші джерела — `references/sources.md` |
+| 3. Браузер | zakon.rada.gov.ua — URL-шаблони в `${CLAUDE_SKILL_DIR}/references/rada-urls.md`; ЄДРСР і ЛПД — їхні сторінки пошуку (це POST-форми, web fetch їх не пройде). Інші джерела — `${CLAUDE_SKILL_DIR}/references/sources.md` |
 | 4. Web search | Щоб **знайти**: номер закону, реквізити постанови, чи змінювалась норма, що означає незрозуміла помилка. Шукай на офіційних доменах (`rada.gov.ua`, `court.gov.ua`, `supreme.court.gov.ua`, `president.gov.ua`, `kmu.gov.ua`). Знайдене — лише підказка: перевір кроками 1–3 |
 | 5. LEXERY | Якщо встановлено — його скрипти й методика сумісні з цими |
 | 6. Не вийшло | `[НЕ ПЕРЕВІРЕНО]` + що саме і де пробував + посилання, за яким людина перевірить сама |

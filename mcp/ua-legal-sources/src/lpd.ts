@@ -238,6 +238,13 @@ export interface DigestResult {
   note: string;
 }
 
+/**
+ * Digest hits returned at most. ☠️ A one-word query («суд») returned 91 hits,
+ * 48 600 characters — at the edge of the 50 000 a client shows inline before
+ * diverting the result to a file. 40 hits keep it near 21 000.
+ */
+const MAX_DIGEST_HITS = 40;
+
 export async function searchDigests(query: string): Promise<DigestResult> {
   const payload = (await call("/digest/search", { query })) as Record<
     string,
@@ -248,7 +255,8 @@ export async function searchDigests(query: string): Promise<DigestResult> {
   const digests =
     typeof payload?.totalDigests === "number" ? payload.totalDigests : null;
 
-  const hits: DigestHit[] = items(payload).map((r) => ({
+  const all = items(payload);
+  const hits: DigestHit[] = all.slice(0, MAX_DIGEST_HITS).map((r) => ({
     title: stripTags(r.title),
     type: stripTags(r.typeLabel),
     page: stripTags(r.pageLabel),
@@ -262,6 +270,9 @@ export async function searchDigests(query: string): Promise<DigestResult> {
     countCapped: total === 100,
     hits,
     note:
+      (all.length > MAX_DIGEST_HITS
+        ? `Показано ${MAX_DIGEST_HITS} з ${all.length} збігів — звузь запит. `
+        : "") +
       (total === 100
         ? "Лічильник обрізано на 100 — не подавай це як статистику. "
         : "") +

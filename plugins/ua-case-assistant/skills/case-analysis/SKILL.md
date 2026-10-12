@@ -6,6 +6,7 @@ description: >
   "слабкі місця", "що скаже опонент", "правовий висновок", "меморандум по справі", "чи варто
   подавати апеляцію", "оціни ризики". It produces a verified legal memo for the advocate and, on request,
   a plain-language summary for the client.
+allowed-tools: mcp__plugin_ua-case-assistant_ua-legal-sources__*
 ---
 
 # Правовий аналіз справи
@@ -43,7 +44,7 @@ description: >
    плюсами/мінусами. Далі — нумерований план: дія, хто, до коли, який документ потрібен.
 
 Специфічні чеклисти для цивільних/сімейних/майнових, кримінальних і адміністративних правопорушень, та
-господарських справ — у `references/checklists.md`. Прочитай відповідний розділ перед кроком 2.
+господарських справ — у `${CLAUDE_SKILL_DIR}/references/checklists.md`. Прочитай відповідний розділ перед кроком 2.
 
 ## Жорсткі правила
 

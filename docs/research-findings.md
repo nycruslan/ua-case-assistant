@@ -159,6 +159,20 @@ Mac. 16 findings; each re-checked here before fixing. Verified:
 - **A Claude Code update leaves `~/.local/bin/claude` pointing at a deleted version** (the desktop app keeps
   the CLI under `~/Library/Application Support/Claude/claude-code/<version>/<hash>/`).
 
+### Found by a full review against current Claude Code docs (2026-10-11)
+- **A text result over 50 000 characters is saved to a file**, not shown (code.claude.com/docs/en/mcp) —
+  stricter than the 25 000-token cap for Cyrillic. Measured worst cases: `lpd_digest_search «суд»` 48 600
+  (now capped at 40 hits), Митний кодекс contents 34 800 (now bounded by size too); everything else ≤ 34 000.
+- **Third-party marketplaces do not auto-update by default** (code.claude.com/docs/en/plugins/loading); a user
+  keeps the installed version until they update or enable auto-update. Setup now checks and says how.
+- **КПК mixes Latin and Cyrillic Roman numerals**: «Розділ I», «Розділ ІІ» (Cyrillic), «Розділ III».
+  «Розділ II» found nothing; before the prefix boundary it returned «Розділ III».
+- **The resolver needs only the newest live candidate's card**: reading cards newest-first and stopping at
+  the first in force took «КПК» from 9 polite-paced requests to 6 (44 s cold, inside the 45 s budget).
+- **MCP SDK 1.30.0 carried advisory GHSA-6qxp-vccf-f47h** (OAuth client); the stdio server does not use that
+  path, but the bundle now ships 1.32.1. `${CLAUDE_SKILL_DIR}` and `allowed-tools` are documented skill
+  features; plugin MCP tools are pre-approved as `mcp__plugin_ua-case-assistant_ua-legal-sources__*`.
+
 ### Engineering findings that cost real debugging time
 - **Superseded diagnosis, kept as a warning:** roughly a third of Node requests to data.rada died with
   `ECONNRESET` while curl never failed. It was first blamed on connection pooling, and a fresh

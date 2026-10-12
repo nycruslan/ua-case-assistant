@@ -24,7 +24,13 @@ Works in **Claude Code** and **Claude Cowork**.
 ```
 
 Then **restart** the app once. Claude Code connects a plugin's MCP server at session start, so the tools
-appear in your next session, not the current one. After that, run:
+appear in your next session, not the current one.
+
+**Turn on auto-update**: `/plugin` → **Marketplaces** → `ua-legal` → **Enable auto-update**. Marketplaces
+outside Anthropic's own are not auto-updated by default, so without this you keep the version you installed.
+To update by hand: `/plugin marketplace update ua-legal`, then `/plugin update ua-case-assistant@ua-legal`.
+
+After that, run:
 
 ```
 /ua-case-assistant:setup
@@ -121,7 +127,7 @@ is never de-anonymised or linked across documents.
 
 ```bash
 cd mcp/ua-legal-sources && npm install
-npm test              # 92 unit tests on recorded fixtures, no network
+npm test              # 94 unit tests on recorded fixtures, no network
 npm run check-config  # the repo's dev .mcp.json launches the server
 npm run build         # rebuild the bundle the plugin ships
 npm run check-plugin  # the BUNDLED plugin server, spawned as a client would

@@ -392,11 +392,6 @@ export interface EdrsrDocResult {
 }
 
 /**
- * Read one document. `mode` picks WHICH part, so a single fetch answers the
- * question asked — head truncation otherwise hides the operative part entirely,
- * which is exactly what «чим закінчилась справа» needs.
- */
-/**
  * Characters returned per slice. A постанова runs to ~95 000; 20 000 keeps one
  * slice near 8k tokens, the same budget as a law unit, well under Claude Code's
  * 25k hard cap. Use mode=operative or grep to reach a specific part.
@@ -405,6 +400,41 @@ const CHUNK = 20_000;
 /** Maximum grep hits returned; more than this is a sign to narrow the needle. */
 const MAX_HITS = 25;
 
+/**
+ * Every place `needle` occurs, with context, as non-overlapping excerpts.
+ *
+ * ☠️ Fixed windows around each hit repeated the same paragraph once per nearby
+ * hit — a three-hit paragraph came back three times. Overlapping windows are
+ * merged, so the answer carries more distinct text for the same size.
+ */
+export function grepExcerpts(
+  body: string,
+  needle: string,
+): { excerpts: string[]; hits: number; capped: boolean } {
+  const re = new RegExp(needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "giu");
+  const windows: [number, number][] = [];
+  let hits = 0;
+  for (const m of body.matchAll(re)) {
+    if (hits === MAX_HITS) return { excerpts: cut(), hits, capped: true };
+    hits++;
+    const from = Math.max(0, m.index - 400);
+    const to = Math.min(body.length, m.index + m[0].length + 600);
+    const last = windows.at(-1);
+    if (last && from <= last[1]) last[1] = Math.max(last[1], to);
+    else windows.push([from, to]);
+  }
+  return { excerpts: cut(), hits, capped: false };
+
+  function cut() {
+    return windows.map(([from, to]) => body.slice(from, to).trim());
+  }
+}
+
+/**
+ * Read one document. `mode` picks WHICH part, so a single fetch answers the
+ * question asked — head truncation otherwise hides the operative part entirely,
+ * which is exactly what «чим закінчилась справа» needs.
+ */
 export async function document(
   id: string,
   mode: DocMode = "head",
@@ -474,26 +504,14 @@ export async function document(
     if (!needle) {
       throw new SourceError("mode=grep потребує параметра needle.", "input");
     }
-    const hits: string[] = [];
-    const re = new RegExp(
-      needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
-      "giu",
-    );
-    let m: RegExpExecArray | null;
-    while ((m = re.exec(body)) !== null && hits.length < MAX_HITS) {
-      hits.push(
-        body.slice(Math.max(0, m.index - 400), m.index + 600).trim(),
-      );
-      re.lastIndex = m.index + Math.max(1, needle.length);
-    }
-    text = hits.length
-      ? hits.join("\n\n— — —\n\n")
+    const { excerpts, hits, capped } = grepExcerpts(body, needle);
+    text = excerpts.length
+      ? excerpts.join("\n\n— — —\n\n")
       : `Слова «${needle}» у документі ${id} немає.`;
-    note =
-      hits.length === MAX_HITS
-        ? `Показано перші ${MAX_HITS} згадок — їх може бути більше. ` +
-          `Звузь слово, якщо потрібен точніший зріз.`
-        : `${hits.length} згадок.`;
+    note = capped
+      ? `Показано перші ${MAX_HITS} згадок — їх може бути більше. ` +
+        `Звузь слово, якщо потрібен точніший зріз.`
+      : `${hits} згадок.`;
   } else if (mode === "tail") {
     text = body.slice(-CHUNK);
   } else {

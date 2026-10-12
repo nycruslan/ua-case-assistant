@@ -15,7 +15,11 @@
 ```
 
 Далі **перезапусти застосунок** один раз: MCP-сервер плагіна під'єднується на старті сесії, а не через
-`/reload-plugins`. Потім запусти `/ua-case-assistant:setup` — він перевірить джерела, запропонує LEXERY і
+`/reload-plugins`.
+
+**Увімкни автооновлення**: `/plugin` → **Marketplaces** → `ua-legal` → **Enable auto-update**. Сторонні
+маркетплейси за замовчуванням не оновлюються, тож без цього виправлення до тебе не дійдуть. Вручну:
+`/plugin marketplace update ua-legal`, потім `/plugin update ua-case-assistant@ua-legal`. Потім запусти `/ua-case-assistant:setup` — він перевірить джерела, запропонує LEXERY і
 створить приватну папку справи.
 
 ## Що потрібно поруч

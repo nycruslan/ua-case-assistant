@@ -39,6 +39,7 @@ import {
   resolve,
   sliceUnit,
   splitMarkers,
+  strikeDown,
 } from "./rada.ts";
 import * as lpd from "./lpd.ts";
 import * as edrsr from "./edrsr.ts";
@@ -75,8 +76,10 @@ const COURT_DATE = z
 /**
  * Every tool returns text; errors are returned as content, not thrown.
  *
- * Compact JSON, not pretty-printed: indentation is pure token cost to the user,
- * and Claude Code caps a tool result at 25 000 tokens (warning at 10 000).
+ * Compact JSON, not pretty-printed: indentation is pure token cost to the user.
+ * Claude Code caps a tool result at 25 000 tokens (warning at 10 000) and saves
+ * a text result over 50 000 characters to a file instead of showing it, so every
+ * answer here stays under 50 000 characters (largest measured: ~34 000).
  */
 function ok(payload: unknown) {
   return {
@@ -144,12 +147,12 @@ const running = new Map<string, { work: Promise<unknown>; at: number }>();
  */
 function budgeted<A, R>(name: string, handler: (args: A) => Promise<R>) {
   return async (args: A) => {
-    const now = Date.now();
-    for (const [k, v] of running) if (now - v.at > KEEP_MS) running.delete(k);
+    const started = Date.now();
+    for (const [k, v] of running) if (started - v.at > KEEP_MS) running.delete(k);
     const key = `${name}:${JSON.stringify(args)}`;
     let entry = running.get(key);
     if (!entry) {
-      entry = { work: handler(args), at: now };
+      entry = { work: handler(args), at: started };
       running.set(key, entry);
     }
     const work = entry.work as Promise<R>;
@@ -510,10 +513,22 @@ server.registerTool(
       const text = t.text;
       const index = buildIndex(text.body);
       const all = listUnits(index, filter);
+      // Bounded by size as well as count: Митний кодекс's 400 headings already
+      // came to 35 000 characters, and long titles could pass 50 000.
+      const headings: string[] = [];
+      let size = 0;
+      for (const h of all) {
+        if (headings.length === 400 || size + h.length > 30_000) break;
+        headings.push(h);
+        size += h.length + 3;
+      }
       // A short amending law has no articles or headings to list — only numbered
       // points. Listing nothing would make it unreadable, so give the text.
       const unstructured = index.articles.size === 0 && index.structural.length === 0;
-      const full = unstructured ? splitMarkers(text.body.replace(/\r\n?/g, "\n")) : undefined;
+      const struck = unstructured
+        ? strikeDown(text.body.replace(/\r\n?/g, "\n"), t.asOf ?? kyivToday())
+        : undefined;
+      const full = struck ? splitMarkers(struck.text) : undefined;
       return {
         nreg: t.meta.nreg,
         as_of: t.asOf,
@@ -523,12 +538,18 @@ server.registerTool(
         total_articles: index.articles.size,
         total_structural: index.structural.length,
         matches: all.length,
-        headings: all.slice(0, 400),
-        truncated: all.length > 400,
+        headings,
+        truncated: headings.length < all.length,
+        truncated_note:
+          headings.length < all.length
+            ? `Показано ${headings.length} з ${all.length}. Звузь через filter ` +
+              `(слово з назви статті, «Розділ», «Глава» чи «виключено»).`
+            : undefined,
         ...(full
           ? {
               full_text: full.clean.slice(0, MAX_UNIT_CHARS),
               full_text_truncated: full.clean.length > MAX_UNIT_CHARS,
+              ...(struck?.items.length ? { unconstitutional: struck.items } : {}),
               note:
                 "В акті немає статей чи розділів — лише пронумеровані пункти, тож " +
                 "текст наведено повністю. Окремий пункт: rada_unit з unit «п. N».",

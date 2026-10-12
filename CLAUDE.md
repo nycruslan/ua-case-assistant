@@ -54,8 +54,9 @@ Ukrainian. Started in Claude Cowork on 2026-09-20, developed in Claude Code sinc
   the app to pick up changes.
 - Never loosen a rate limit or the ЄДРСР no-disk-cache rule to make something faster. Those are the contract
   with these sources, and the reasons are in the code comments.
-- Keep every tool result under Claude Code's 25 000-token cap on MCP output (~60 000 Cyrillic chars). Anything
-  that can grow — law units, search results, decision text — is bounded in the server and says when it was cut.
+- Keep every tool result under 50 000 characters: Claude Code saves a longer text result to a file
+  instead of showing it, and caps MCP output at 25 000 tokens. Anything that can grow — law units, search
+  results, decision text — is bounded in the server and says when it was cut.
 - Never write `\uXXXX` escapes through an editing tool: parameters are JSON, so they decode into the raw
   (often invisible) character. Build such characters with `String.fromCharCode` / `chr()`.
 - Network etiquette for Ukrainian state sources is part of the contract: targeted requests only, no bulk

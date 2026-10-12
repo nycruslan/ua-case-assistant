@@ -7,6 +7,7 @@ description: >
   user, builds the case folder structure, reads every document (PDF, scans, photos, Word, Excel, e-mail,
   messenger screenshots; flags audio for transcription) and writes CASE.md — the single source of truth that
   all other skills of this plugin read first.
+allowed-tools: Bash(textutil -convert txt -stdout *) Bash(sips -s format jpeg *) Bash(unzip -p *) Bash(afinfo *) Bash(iconv -f cp1251 -t utf-8 *)
 ---
 
 # Налаштування справи
@@ -55,7 +56,7 @@ CASE.md  INDEX.md  CHRONOLOGY.md  EVIDENCE.md  DEADLINES.md  LOG.md
 
 ## Крок 3. Прочитати кожен документ
 
-Як читати кожен формат вбудованими засобами — `references/reading-files.md`. Прочитай його перед першим
+Як читати кожен формат вбудованими засобами — `${CLAUDE_SKILL_DIR}/references/reading-files.md`. Прочитай його перед першим
 файлом. Головне:
 - ☠️ фото HEIC з iPhone ніколи не відкривай `Read` напряму — спершу конвертуй у JPG;
 - DOCX/RTF — через `textutil` (macOS), XLSX — скриптом із довідника, лист EML — декодуй заголовки;
@@ -76,7 +77,7 @@ CASE.md  INDEX.md  CHRONOLOGY.md  EVIDENCE.md  DEADLINES.md  LOG.md
 
 ## Крок 4. Профіль справи
 
-Заповни `CASE.md` за шаблоном `references/case-template.md`:
+Заповни `CASE.md` за шаблоном `${CLAUDE_SKILL_DIR}/references/case-template.md`:
 - кожен факт — з посиланням (`D003, с. 2`) або «(зі слів клієнта)»;
 - невідоме — у «Відкриті питання», не вгадуй;
 - правову кваліфікацію не роби остаточною: це робота `case-analysis`.

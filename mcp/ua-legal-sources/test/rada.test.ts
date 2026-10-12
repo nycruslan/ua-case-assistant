@@ -699,3 +699,15 @@ test("today is the Kyiv date, not the UTC one", () => {
   // 01:30 in Kyiv on the 10th is still the 9th in UTC.
   assert.equal(kyivToday(new Date("2026-10-09T22:30:00Z")), "2026-10-10");
 });
+
+test("a Roman numeral matches whether the act wrote it in Latin or Cyrillic letters", () => {
+  // ☠️ КПК: «Розділ I» Latin, «Розділ ІІ» Cyrillic. «Розділ II» once returned «Розділ III».
+  const ix = kpk("2026-10-10");
+  for (const unit of ["Розділ II", "Розділ 2", "розділ ii"]) {
+    const r = sliceUnit(ix, unit);
+    assert.equal(r.occurrences.length, 1, unit);
+    assert.match(r.occurrences[0].text, /Глава 10\./, unit);
+  }
+  assert.match(sliceUnit(ix, "Розділ I").occurrences[0].text, /Глава 1\./);
+  assert.doesNotMatch(sliceUnit(ix, "Розділ I").occurrences[0].text, /Глава 10\./);
+});

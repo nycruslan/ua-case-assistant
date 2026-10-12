@@ -11481,6 +11481,7 @@ __export(util_exports, {
   required: () => required,
   safeExtend: () => safeExtend,
   shallowClone: () => shallowClone,
+  sizeCaps: () => sizeCaps,
   slugify: () => slugify,
   stringifyPrimitive: () => stringifyPrimitive,
   toZod: () => toZod,
@@ -11999,6 +12000,18 @@ function prefixIssues(path, issues) {
 }
 function unwrapMessage(message) {
   return typeof message === "string" ? message : message?.message;
+}
+function sizeCaps(defChecks) {
+  const caps = [];
+  for (const ch of defChecks ?? []) {
+    const d = ch._zod.def;
+    if (!/_(length|size)$|_equals$/.test(d.check))
+      break;
+    const max = d.maximum ?? d.length ?? d.size;
+    if (max >= 0)
+      caps.push([max, ch]);
+  }
+  return caps;
 }
 function attachSchema(issues, start, inst) {
   var _a3;
@@ -13420,7 +13433,7 @@ ${content.join("\n")}
 var version = {
   major: 4,
   minor: 6,
-  patch: 5
+  patch: 6
 };
 
 // node_modules/zod/v4/core/schemas.js
@@ -14176,6 +14189,31 @@ var $ZodDate = /* @__PURE__ */ $constructor("$ZodDate", (inst, def) => {
     return payload;
   };
 });
+function capSize(inst, size) {
+  const caps = sizeCaps(inst._zod.def.checks);
+  if (!caps.length)
+    return;
+  const cap = Math.min(...caps.map((c) => c[0]));
+  const parse3 = inst._zod.parse;
+  inst._zod.parse = (payload, ctx) => {
+    const n = size(payload.value);
+    if (n > cap && !ctx?.skipChecks && ctx?.direction !== "backward") {
+      for (const [max, ch] of sizeCaps(inst._zod.def.checks)) {
+        if (n > max && ch._zod.def.when(payload)) {
+          const start = payload.issues.length;
+          ch._zod.check(payload);
+          payload.issues[start].continue = false;
+          attachSchema(payload.issues, start, inst);
+          return payload;
+        }
+      }
+    }
+    return parse3(payload, ctx);
+  };
+}
+var arraySize = (input2) => Array.isArray(input2) ? input2.length : -1;
+var mapSize = (input2) => input2 instanceof Map ? input2.size : -1;
+var setSize = (input2) => input2 instanceof Set ? input2.size : -1;
 function handleArrayResult(result, final, index) {
   if (result.issues.length) {
     final.issues.push(...prefixIssues(index, result.issues));
@@ -14219,6 +14257,7 @@ var $ZodArray = /* @__PURE__ */ $constructor("$ZodArray", (inst, def) => {
     }
     return payload;
   };
+  capSize(inst, arraySize);
 });
 function handlePropertyResult(result, final, key, input2, optin, optout) {
   const isPresent = key in input2;
@@ -15175,6 +15214,7 @@ var $ZodMap = /* @__PURE__ */ $constructor("$ZodMap", (inst, def) => {
       return Promise.all(proms).then(() => payload);
     return payload;
   };
+  capSize(inst, mapSize);
 });
 function handleMapResult(keyResult, valueResult, final, key, input2, inst, ctx) {
   if (keyResult.issues.length) {
@@ -15241,6 +15281,7 @@ var $ZodSet = /* @__PURE__ */ $constructor("$ZodSet", (inst, def) => {
       return Promise.all(proms).then(() => payload);
     return payload;
   };
+  capSize(inst, setSize);
 });
 function handleSetResult(result, final) {
   if (result.issues.length) {
@@ -24771,9 +24812,15 @@ function generateNullableCheck(doc, ctx, schema, accessor, buildsValue = true) {
   doc.write(`}`);
   return outputVar;
 }
+function generateSizeGate(doc, schema, size) {
+  for (const [max, check2] of sizeCaps(schema._zod.def.checks)) {
+    doc.write(`if (${size} > ${numericOperand(max, check2._zod.def.check)}) return INVALID;`);
+  }
+}
 function generateArrayCheck(doc, ctx, schema, accessor, buildsValue = true) {
   const def = schema._zod.def;
   doc.write(`if (!Array.isArray(${accessor})) return INVALID;`);
+  generateSizeGate(doc, schema, `${accessor}.length`);
   const outputVar = buildsValue ? newVar(ctx) : null;
   const iVar = newVar(ctx);
   const elemVar = newVar(ctx);
@@ -25173,6 +25220,7 @@ function literalPropertyKey(ctx, key) {
 function generateMapCheck(doc, ctx, schema, accessor) {
   const def = schema._zod.def;
   doc.write(`if (!(${accessor} instanceof Map)) return INVALID;`);
+  generateSizeGate(doc, schema, `${accessor}.size`);
   const outputVar = newVar(ctx);
   const kVar = newVar(ctx);
   const valVar = newVar(ctx);
@@ -25189,6 +25237,7 @@ function generateMapCheck(doc, ctx, schema, accessor) {
 function generateSetCheck(doc, ctx, schema, accessor) {
   const def = schema._zod.def;
   doc.write(`if (!(${accessor} instanceof Set)) return INVALID;`);
+  generateSizeGate(doc, schema, `${accessor}.size`);
   const outputVar = newVar(ctx);
   const valVar = newVar(ctx);
   doc.write(`const ${outputVar} = new Set();`);
@@ -33890,6 +33939,9 @@ var Protocol = class {
       this.setRequestHandler(GetTaskPayloadRequestSchema, async (request2, extra) => {
         const handleTaskResult = async () => {
           const taskId = request2.params.taskId;
+          if (!await this._taskStore.getTask(taskId, extra.sessionId)) {
+            throw new McpError(ErrorCode.InvalidParams, `Task not found: ${taskId}`);
+          }
           if (this._taskMessageQueue) {
             let queuedMessage;
             while (queuedMessage = await this._taskMessageQueue.dequeue(taskId, extra.sessionId)) {
@@ -33920,12 +33972,12 @@ var Protocol = class {
             throw new McpError(ErrorCode.InvalidParams, `Task not found: ${taskId}`);
           }
           if (!isTerminal(task.status)) {
-            await this._waitForTaskUpdate(taskId, extra.signal);
+            await this._waitForTaskUpdate(taskId, extra.signal, extra.sessionId);
             return await handleTaskResult();
           }
           if (isTerminal(task.status)) {
             const result = await this._taskStore.getTaskResult(taskId, extra.sessionId);
-            this._clearTaskQueue(taskId);
+            this._clearTaskQueue(taskId, extra.sessionId);
             return {
               ...result,
               _meta: {
@@ -33962,7 +34014,7 @@ var Protocol = class {
             throw new McpError(ErrorCode.InvalidParams, `Cannot cancel task in terminal status: ${task.status}`);
           }
           await this._taskStore.updateTaskStatus(request2.params.taskId, "cancelled", "Client cancelled task execution.", extra.sessionId);
-          this._clearTaskQueue(request2.params.taskId);
+          this._clearTaskQueue(request2.params.taskId, extra.sessionId);
           const cancelledTask = await this._taskStore.getTask(request2.params.taskId, extra.sessionId);
           if (!cancelledTask) {
             throw new McpError(ErrorCode.InvalidParams, `Task not found after cancellation: ${request2.params.taskId}`);
@@ -34090,6 +34142,19 @@ var Protocol = class {
     const handler = this._requestHandlers.get(request2.method) ?? this.fallbackRequestHandler;
     const capturedTransport = this._transport;
     const relatedTaskId = request2.params?._meta?.[RELATED_TASK_META_KEY]?.taskId;
+    const sessionId = capturedTransport?.sessionId;
+    const store = this._taskStore;
+    let relatedTaskFound = true;
+    let relatedTaskLookup;
+    if (relatedTaskId && store && this._taskMessageQueue && sessionId !== void 0) {
+      relatedTaskFound = false;
+      relatedTaskLookup = (async () => {
+        if (!await store.getTask(relatedTaskId, sessionId)) {
+          throw new McpError(ErrorCode.InvalidParams, `Task not found: ${relatedTaskId}`);
+        }
+        relatedTaskFound = true;
+      })();
+    }
     if (handler === void 0) {
       const errorResponse = {
         jsonrpc: "2.0",
@@ -34099,7 +34164,10 @@ var Protocol = class {
           message: "Method not found"
         }
       };
-      if (relatedTaskId && this._taskMessageQueue) {
+      if (relatedTaskId && relatedTaskLookup) {
+        const queuedError = { type: "error", message: errorResponse, timestamp: Date.now() };
+        relatedTaskLookup.then(() => this._enqueueTaskMessage(relatedTaskId, queuedError, sessionId), () => capturedTransport?.send(errorResponse)).catch((error62) => this._onerror(new Error(`Failed to send an error response: ${error62}`)));
+      } else if (relatedTaskId && this._taskMessageQueue) {
         this._enqueueTaskMessage(relatedTaskId, {
           type: "error",
           message: errorResponse,
@@ -34150,7 +34218,10 @@ var Protocol = class {
       closeSSEStream: extra?.closeSSEStream,
       closeStandaloneSSEStream: extra?.closeStandaloneSSEStream
     };
-    Promise.resolve().then(() => {
+    (relatedTaskLookup ?? Promise.resolve()).then(() => {
+      if (relatedTaskLookup && abortController.signal.aborted) {
+        throw new McpError(ErrorCode.ConnectionClosed, "Request was cancelled");
+      }
       if (taskCreationParams) {
         this.assertTaskHandlerCapability(request2.method);
       }
@@ -34185,7 +34256,7 @@ var Protocol = class {
           ...error62["data"] !== void 0 && { data: error62["data"] }
         }
       };
-      if (relatedTaskId && this._taskMessageQueue) {
+      if (relatedTaskId && this._taskMessageQueue && relatedTaskFound) {
         await this._enqueueTaskMessage(relatedTaskId, {
           type: "error",
           message: errorResponse,
@@ -34665,7 +34736,7 @@ var Protocol = class {
       throw new Error("Cannot enqueue task message: taskStore and taskMessageQueue are not configured");
     }
     const maxQueueSize = this._options?.maxTaskQueueSize;
-    await this._taskMessageQueue.enqueue(taskId, message, sessionId, maxQueueSize);
+    await this._taskMessageQueue.enqueue(taskId, message, sessionId ?? this._transport?.sessionId, maxQueueSize);
   }
   /**
    * Clears the message queue for a task and rejects any pending request resolvers.
@@ -34694,12 +34765,13 @@ var Protocol = class {
    * Uses polling to check for updates at the task's configured poll interval.
    * @param taskId The task ID to wait for
    * @param signal Abort signal to cancel the wait
+   * @param sessionId Session of the request that waits, passed to the task store
    * @returns Promise that resolves when an update occurs or rejects if aborted
    */
-  async _waitForTaskUpdate(taskId, signal) {
+  async _waitForTaskUpdate(taskId, signal, sessionId) {
     let interval = this._options?.defaultTaskPollInterval ?? 1e3;
     try {
-      const task = await this._taskStore?.getTask(taskId);
+      const task = await this._taskStore?.getTask(taskId, sessionId);
       if (task?.pollInterval) {
         interval = task.pollInterval;
       }
@@ -35578,6 +35650,42 @@ var ExperimentalMcpServerTasks = class {
 };
 
 // node_modules/@modelcontextprotocol/sdk/dist/esm/server/mcp.js
+function toolInputElementCount(value, max) {
+  let count = 0;
+  const stack = [value];
+  while (stack.length > 0) {
+    const node2 = stack.pop();
+    if (node2 === null || typeof node2 !== "object")
+      continue;
+    if (Array.isArray(node2)) {
+      for (const child of node2) {
+        if (++count > max)
+          return count;
+        if (child !== null && typeof child === "object")
+          stack.push(child);
+      }
+    } else {
+      for (const key in node2) {
+        if (!Object.prototype.hasOwnProperty.call(node2, key))
+          continue;
+        if (++count > max)
+          return count;
+        const child = node2[key];
+        if (child !== null && typeof child === "object")
+          stack.push(child);
+      }
+    }
+  }
+  return count;
+}
+function resolveMaxToolInputElements(value) {
+  if (value === void 0 || value === Infinity)
+    return void 0;
+  if (typeof value !== "number" || Number.isNaN(value) || value < 1) {
+    throw new RangeError(`maxToolInputElements must be a number of at least 1, or Infinity, got ${String(value)}`);
+  }
+  return value;
+}
 var McpServer = class {
   constructor(serverInfo, options) {
     this._registeredResources = {};
@@ -35589,6 +35697,7 @@ var McpServer = class {
     this._resourceHandlersInitialized = false;
     this._promptHandlersInitialized = false;
     this.server = new Server(serverInfo, options);
+    this._maxToolInputElements = resolveMaxToolInputElements(options?.maxToolInputElements);
   }
   /**
    * Access experimental features.
@@ -35719,12 +35828,15 @@ var McpServer = class {
    * Validates tool input arguments against the tool's input schema.
    */
   async validateToolInput(tool, args, toolName) {
+    if (this._maxToolInputElements !== void 0 && toolInputElementCount(args, this._maxToolInputElements) > this._maxToolInputElements) {
+      throw new McpError(ErrorCode.InvalidParams, `Invalid arguments for tool ${toolName}: arguments contain more than the maximum of ${this._maxToolInputElements} elements`);
+    }
     if (!tool.inputSchema) {
       return void 0;
     }
     const inputObj = normalizeObjectSchema(tool.inputSchema);
     const schemaToParse = inputObj ?? tool.inputSchema;
-    const parseResult = await safeParseAsync2(schemaToParse, args);
+    const parseResult = await safeParseAsync2(schemaToParse, args ?? {});
     if (!parseResult.success) {
       const error62 = "error" in parseResult ? parseResult.error : "Unknown error";
       const errorMessage = getParseErrorMessage(error62);
@@ -35962,7 +36074,7 @@ var McpServer = class {
       }
       if (prompt.argsSchema) {
         const argsObj = normalizeObjectSchema(prompt.argsSchema);
-        const parseResult = await safeParseAsync2(argsObj, request2.params.arguments);
+        const parseResult = await safeParseAsync2(argsObj, request2.params.arguments ?? {});
         if (!parseResult.success) {
           const error62 = "error" in parseResult ? parseResult.error : "Unknown error";
           const errorMessage = getParseErrorMessage(error62);
@@ -36479,7 +36591,7 @@ var StdioServerTransport = class {
 // package.json
 var package_default = {
   name: "ua-legal-sources",
-  version: "0.6.0",
+  version: "0.6.1",
   description: "Local MCP server for Ukrainian legal sources (data.rada, \u0404\u0414\u0420\u0421\u0420, \u041B\u041F\u0414 \u0412\u0421).",
   scripts: {
     test: "node --experimental-strip-types --test test/*.test.ts",
@@ -36493,11 +36605,11 @@ var package_default = {
   license: "Apache-2.0",
   type: "module",
   dependencies: {
-    "@modelcontextprotocol/sdk": "^1.30.0",
-    zod: "^4.6.5"
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    zod: "^4.6.6"
   },
   devDependencies: {
-    "@types/node": "^26.6.2",
+    "@types/node": "^26.6.5",
     esbuild: "^0.28.2",
     typescript: "^7.0.2"
   }
@@ -37191,8 +37303,14 @@ function toRoman(n) {
   }
   return out;
 }
+var CYR_I = String.fromCharCode(1110);
+var CYR_X = String.fromCharCode(1093);
+var ROMAN_TOKEN = new RegExp(`(^|\\s)([ivxlcdm${CYR_I}${CYR_X}]+)(?=$|[\\s.:,])`, "gu");
 function normHeading(s) {
-  return plainDashes(s).replace(APOSTROPHES, "'").toLowerCase().replace(/\s+/g, " ").trim();
+  return plainDashes(s).replace(APOSTROPHES, "'").toLowerCase().replace(/\s+/g, " ").trim().replace(
+    ROMAN_TOKEN,
+    (_, space, numeral) => space + numeral.replaceAll(CYR_I, "i").replaceAll(CYR_X, "x")
+  );
 }
 function headingVariants(spec) {
   const m = /^(книга|розділ)\s+(\d{1,2})$/.exec(spec);
@@ -37630,32 +37748,40 @@ async function resolve(name, maxCandidates = 4) {
       note: `\u0420\u0435\u0454\u0441\u0442\u0440 \u043D\u0435 \u0434\u0430\u0432 \u043E\u0434\u043D\u043E\u0437\u043D\u0430\u0447\u043D\u043E\u0457 \u0432\u0456\u0434\u043F\u043E\u0432\u0456\u0434\u0456 \u043D\u0430 \xAB${name}\xBB. \u0421\u043F\u0438\u0441\u043E\u043A, \u044F\u043A\u0438\u0439 \u0432\u0456\u043D \u043F\u043E\u0432\u0435\u0440\u0442\u0430\u0454 \u0437\u0430\u043C\u0456\u0441\u0442\u044C \u043D\u0435\u0457, \u0432\u0456\u0434\u0441\u043E\u0440\u0442\u043E\u0432\u0430\u043D\u0438\u0439 \u0417\u0410 \u0414\u0410\u0422\u041E\u042E, \u0430 \u043D\u0435 \u0437\u0430 \u0440\u0435\u043B\u0435\u0432\u0430\u043D\u0442\u043D\u0456\u0441\u0442\u044E, \u0442\u043E\u043C\u0443 \u043F\u043E\u0442\u0440\u0456\u0431\u043D\u043E\u0433\u043E \u0430\u043A\u0442\u0430 \u0432 \u043D\u044C\u043E\u043C\u0443 \u043C\u043E\u0436\u0435 \u043D\u0435 \u0431\u0443\u0442\u0438 \u0432\u0437\u0430\u0433\u0430\u043B\u0456. \u0421\u043F\u0440\u043E\u0431\u0443\u0439 \u043F\u043E\u0447\u0430\u0442\u043E\u043A \u043E\u0444\u0456\u0446\u0456\u0439\u043D\u043E\u0457 \u043D\u0430\u0437\u0432\u0438 (\xAB\u041F\u0440\u043E \u2026\xBB) \u0430\u0431\u043E \u043D\u043E\u043C\u0435\u0440 \u0430\u043A\u0442\u0430 (\xAB3543-XII\xBB).`
     };
   }
-  const candidates = [];
+  const metas = [];
   for (const nreg of nregs.slice(0, maxCandidates)) {
-    try {
-      const meta3 = await getMeta(nreg);
-      const card = meta3.isArchive ? void 0 : await getCard(nreg);
-      candidates.push({
-        nreg: meta3.nreg,
-        title: card?.title || meta3.nazva,
-        statusText: card?.statusText || (meta3.isArchive ? "\u0430\u0440\u0445\u0456\u0432\u043D\u0430 \u0440\u0435\u0434\u0430\u043A\u0446\u0456\u044F" : `\u043A\u043E\u0434 \u0441\u0442\u0430\u043D\u0443 ${meta3.statusCode}`),
-        isArchive: meta3.isArchive,
-        currentRedaction: meta3.currentRedaction,
-        officialNumber: meta3.officialNumber,
-        verified: true
-      });
-    } catch {
-      candidates.push({
-        nreg,
-        title: "",
-        statusText: "\u0440\u0435\u043A\u0432\u0456\u0437\u0438\u0442\u0438 \u043D\u0435 \u043E\u0442\u0440\u0438\u043C\u0430\u043D\u043E",
-        isArchive: null,
-        currentRedaction: "",
-        officialNumber: "",
-        verified: false
-      });
-    }
+    metas.push(await getMeta(nreg).then((meta3) => ({ nreg, meta: meta3 }), () => ({ nreg, meta: void 0 })));
   }
+  const cards = /* @__PURE__ */ new Map();
+  const byNewest = metas.filter((m) => m.meta && !m.meta.isArchive).sort((a, b) => b.meta.currentRedaction.localeCompare(a.meta.currentRedaction));
+  for (const { nreg } of byNewest) {
+    const card = await getCard(nreg).catch(() => void 0);
+    cards.set(nreg, card);
+    if (card && !/втратив\s+чинн/i.test(card.statusText)) break;
+  }
+  const candidates = metas.map(({ nreg, meta: meta3 }) => {
+    const card = cards.get(nreg);
+    if (!meta3 || cards.has(nreg) && !card) {
+      return {
+        nreg,
+        title: meta3?.nazva ?? "",
+        statusText: "\u0440\u0435\u043A\u0432\u0456\u0437\u0438\u0442\u0438 \u043D\u0435 \u043E\u0442\u0440\u0438\u043C\u0430\u043D\u043E",
+        isArchive: meta3 ? meta3.isArchive : null,
+        currentRedaction: meta3?.currentRedaction ?? "",
+        officialNumber: meta3?.officialNumber ?? "",
+        verified: false
+      };
+    }
+    return {
+      nreg: meta3.nreg,
+      title: card?.title || meta3.nazva,
+      statusText: card?.statusText || (meta3.isArchive ? "\u0430\u0440\u0445\u0456\u0432\u043D\u0430 \u0440\u0435\u0434\u0430\u043A\u0446\u0456\u044F" : "\u043D\u0435 \u043F\u0435\u0440\u0435\u0432\u0456\u0440\u044F\u043B\u043E\u0441\u044C: \u0454 \u043D\u043E\u0432\u0456\u0448\u0430 \u0447\u0438\u043D\u043D\u0430 \u0440\u0435\u0434\u0430\u043A\u0446\u0456\u044F"),
+      isArchive: meta3.isArchive,
+      currentRedaction: meta3.currentRedaction,
+      officialNumber: meta3.officialNumber,
+      verified: true
+    };
+  });
   const { chosen, note } = selectAct(candidates);
   return { query: name, chosen, candidates, ambiguous: false, note };
 }
@@ -37796,11 +37922,13 @@ async function position(id) {
     linked_positions: (Array.isArray(raw?.linkedLegalPositions) ? raw.linkedLegalPositions : []).map((l) => Number(l?.id)).filter(Number.isFinite)
   };
 }
+var MAX_DIGEST_HITS = 40;
 async function searchDigests(query) {
   const payload = await call("/digest/search", { query });
   const total = typeof payload?.totalMatches === "number" ? payload.totalMatches : null;
   const digests = typeof payload?.totalDigests === "number" ? payload.totalDigests : null;
-  const hits = items(payload).map((r) => ({
+  const all = items(payload);
+  const hits = all.slice(0, MAX_DIGEST_HITS).map((r) => ({
     title: stripTags(r.title),
     type: stripTags(r.typeLabel),
     page: stripTags(r.pageLabel),
@@ -37812,7 +37940,7 @@ async function searchDigests(query) {
     totalDigests: digests,
     countCapped: total === 100,
     hits,
-    note: (total === 100 ? "\u041B\u0456\u0447\u0438\u043B\u044C\u043D\u0438\u043A \u043E\u0431\u0440\u0456\u0437\u0430\u043D\u043E \u043D\u0430 100 \u2014 \u043D\u0435 \u043F\u043E\u0434\u0430\u0432\u0430\u0439 \u0446\u0435 \u044F\u043A \u0441\u0442\u0430\u0442\u0438\u0441\u0442\u0438\u043A\u0443. " : "") + "\u041E\u0433\u043B\u044F\u0434 \u0412\u0421 \u2014 \u043E\u0444\u0456\u0446\u0456\u0439\u043D\u0435 \u0443\u0437\u0430\u0433\u0430\u043B\u044C\u043D\u0435\u043D\u043D\u044F \u0441\u0430\u043C\u043E\u0433\u043E \u0441\u0443\u0434\u0443, \u0430\u043B\u0435 \u041D\u0415 \u0434\u0436\u0435\u0440\u0435\u043B\u043E \u043F\u0440\u0430\u0432\u0430. \u0414\u043B\u044F \u0430\u0440\u0433\u0443\u043C\u0435\u043D\u0442\u0443 \u0446\u0438\u0442\u0443\u0439 \u043F\u043E\u0441\u0442\u0430\u043D\u043E\u0432\u0443, \u043D\u0430 \u044F\u043A\u0443 \u043E\u0433\u043B\u044F\u0434 \u043F\u043E\u0441\u0438\u043B\u0430\u0454\u0442\u044C\u0441\u044F."
+    note: (all.length > MAX_DIGEST_HITS ? `\u041F\u043E\u043A\u0430\u0437\u0430\u043D\u043E ${MAX_DIGEST_HITS} \u0437 ${all.length} \u0437\u0431\u0456\u0433\u0456\u0432 \u2014 \u0437\u0432\u0443\u0437\u044C \u0437\u0430\u043F\u0438\u0442. ` : "") + (total === 100 ? "\u041B\u0456\u0447\u0438\u043B\u044C\u043D\u0438\u043A \u043E\u0431\u0440\u0456\u0437\u0430\u043D\u043E \u043D\u0430 100 \u2014 \u043D\u0435 \u043F\u043E\u0434\u0430\u0432\u0430\u0439 \u0446\u0435 \u044F\u043A \u0441\u0442\u0430\u0442\u0438\u0441\u0442\u0438\u043A\u0443. " : "") + "\u041E\u0433\u043B\u044F\u0434 \u0412\u0421 \u2014 \u043E\u0444\u0456\u0446\u0456\u0439\u043D\u0435 \u0443\u0437\u0430\u0433\u0430\u043B\u044C\u043D\u0435\u043D\u043D\u044F \u0441\u0430\u043C\u043E\u0433\u043E \u0441\u0443\u0434\u0443, \u0430\u043B\u0435 \u041D\u0415 \u0434\u0436\u0435\u0440\u0435\u043B\u043E \u043F\u0440\u0430\u0432\u0430. \u0414\u043B\u044F \u0430\u0440\u0433\u0443\u043C\u0435\u043D\u0442\u0443 \u0446\u0438\u0442\u0443\u0439 \u043F\u043E\u0441\u0442\u0430\u043D\u043E\u0432\u0443, \u043D\u0430 \u044F\u043A\u0443 \u043E\u0433\u043B\u044F\u0434 \u043F\u043E\u0441\u0438\u043B\u0430\u0454\u0442\u044C\u0441\u044F."
   };
 }
 
@@ -37980,6 +38108,24 @@ function findOperative(text) {
 }
 var CHUNK = 2e4;
 var MAX_HITS = 25;
+function grepExcerpts(body, needle) {
+  const re = new RegExp(needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "giu");
+  const windows = [];
+  let hits = 0;
+  for (const m of body.matchAll(re)) {
+    if (hits === MAX_HITS) return { excerpts: cut(), hits, capped: true };
+    hits++;
+    const from = Math.max(0, m.index - 400);
+    const to = Math.min(body.length, m.index + m[0].length + 600);
+    const last = windows.at(-1);
+    if (last && from <= last[1]) last[1] = Math.max(last[1], to);
+    else windows.push([from, to]);
+  }
+  return { excerpts: cut(), hits, capped: false };
+  function cut() {
+    return windows.map(([from, to]) => body.slice(from, to).trim());
+  }
+}
 async function document(id, mode = "head", needle) {
   if (!/^\d+$/.test(id)) {
     throw new SourceError(`\u0404\u0414\u0420\u0421\u0420 id \u043C\u0430\u0454 \u0431\u0443\u0442\u0438 \u0447\u0438\u0441\u043B\u043E\u043C, \u043E\u0442\u0440\u0438\u043C\u0430\u043D\u043E \xAB${id}\xBB.`, "input");
@@ -38033,20 +38179,9 @@ async function document(id, mode = "head", needle) {
     if (!needle) {
       throw new SourceError("mode=grep \u043F\u043E\u0442\u0440\u0435\u0431\u0443\u0454 \u043F\u0430\u0440\u0430\u043C\u0435\u0442\u0440\u0430 needle.", "input");
     }
-    const hits = [];
-    const re = new RegExp(
-      needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
-      "giu"
-    );
-    let m;
-    while ((m = re.exec(body)) !== null && hits.length < MAX_HITS) {
-      hits.push(
-        body.slice(Math.max(0, m.index - 400), m.index + 600).trim()
-      );
-      re.lastIndex = m.index + Math.max(1, needle.length);
-    }
-    text = hits.length ? hits.join("\n\n\u2014 \u2014 \u2014\n\n") : `\u0421\u043B\u043E\u0432\u0430 \xAB${needle}\xBB \u0443 \u0434\u043E\u043A\u0443\u043C\u0435\u043D\u0442\u0456 ${id} \u043D\u0435\u043C\u0430\u0454.`;
-    note = hits.length === MAX_HITS ? `\u041F\u043E\u043A\u0430\u0437\u0430\u043D\u043E \u043F\u0435\u0440\u0448\u0456 ${MAX_HITS} \u0437\u0433\u0430\u0434\u043E\u043A \u2014 \u0457\u0445 \u043C\u043E\u0436\u0435 \u0431\u0443\u0442\u0438 \u0431\u0456\u043B\u044C\u0448\u0435. \u0417\u0432\u0443\u0437\u044C \u0441\u043B\u043E\u0432\u043E, \u044F\u043A\u0449\u043E \u043F\u043E\u0442\u0440\u0456\u0431\u0435\u043D \u0442\u043E\u0447\u043D\u0456\u0448\u0438\u0439 \u0437\u0440\u0456\u0437.` : `${hits.length} \u0437\u0433\u0430\u0434\u043E\u043A.`;
+    const { excerpts, hits, capped } = grepExcerpts(body, needle);
+    text = excerpts.length ? excerpts.join("\n\n\u2014 \u2014 \u2014\n\n") : `\u0421\u043B\u043E\u0432\u0430 \xAB${needle}\xBB \u0443 \u0434\u043E\u043A\u0443\u043C\u0435\u043D\u0442\u0456 ${id} \u043D\u0435\u043C\u0430\u0454.`;
+    note = capped ? `\u041F\u043E\u043A\u0430\u0437\u0430\u043D\u043E \u043F\u0435\u0440\u0448\u0456 ${MAX_HITS} \u0437\u0433\u0430\u0434\u043E\u043A \u2014 \u0457\u0445 \u043C\u043E\u0436\u0435 \u0431\u0443\u0442\u0438 \u0431\u0456\u043B\u044C\u0448\u0435. \u0417\u0432\u0443\u0437\u044C \u0441\u043B\u043E\u0432\u043E, \u044F\u043A\u0449\u043E \u043F\u043E\u0442\u0440\u0456\u0431\u0435\u043D \u0442\u043E\u0447\u043D\u0456\u0448\u0438\u0439 \u0437\u0440\u0456\u0437.` : `${hits} \u0437\u0433\u0430\u0434\u043E\u043A.`;
   } else if (mode === "tail") {
     text = body.slice(-CHUNK);
   } else {
@@ -38112,12 +38247,12 @@ var KEEP_MS = 10 * 6e4;
 var running = /* @__PURE__ */ new Map();
 function budgeted(name, handler) {
   return async (args) => {
-    const now2 = Date.now();
-    for (const [k, v] of running) if (now2 - v.at > KEEP_MS) running.delete(k);
+    const started = Date.now();
+    for (const [k, v] of running) if (started - v.at > KEEP_MS) running.delete(k);
     const key = `${name}:${JSON.stringify(args)}`;
     let entry = running.get(key);
     if (!entry) {
-      entry = { work: handler(args), at: now2 };
+      entry = { work: handler(args), at: started };
       running.set(key, entry);
     }
     const work = entry.work;
@@ -38350,8 +38485,16 @@ server.registerTool(
     const text = t.text;
     const index = buildIndex(text.body);
     const all = listUnits(index, filter);
+    const headings = [];
+    let size = 0;
+    for (const h of all) {
+      if (headings.length === 400 || size + h.length > 3e4) break;
+      headings.push(h);
+      size += h.length + 3;
+    }
     const unstructured = index.articles.size === 0 && index.structural.length === 0;
-    const full = unstructured ? splitMarkers(text.body.replace(/\r\n?/g, "\n")) : void 0;
+    const struck = unstructured ? strikeDown(text.body.replace(/\r\n?/g, "\n"), t.asOf ?? kyivToday()) : void 0;
+    const full = struck ? splitMarkers(struck.text) : void 0;
     return {
       nreg: t.meta.nreg,
       as_of: t.asOf,
@@ -38361,11 +38504,13 @@ server.registerTool(
       total_articles: index.articles.size,
       total_structural: index.structural.length,
       matches: all.length,
-      headings: all.slice(0, 400),
-      truncated: all.length > 400,
+      headings,
+      truncated: headings.length < all.length,
+      truncated_note: headings.length < all.length ? `\u041F\u043E\u043A\u0430\u0437\u0430\u043D\u043E ${headings.length} \u0437 ${all.length}. \u0417\u0432\u0443\u0437\u044C \u0447\u0435\u0440\u0435\u0437 filter (\u0441\u043B\u043E\u0432\u043E \u0437 \u043D\u0430\u0437\u0432\u0438 \u0441\u0442\u0430\u0442\u0442\u0456, \xAB\u0420\u043E\u0437\u0434\u0456\u043B\xBB, \xAB\u0413\u043B\u0430\u0432\u0430\xBB \u0447\u0438 \xAB\u0432\u0438\u043A\u043B\u044E\u0447\u0435\u043D\u043E\xBB).` : void 0,
       ...full ? {
         full_text: full.clean.slice(0, MAX_UNIT_CHARS),
         full_text_truncated: full.clean.length > MAX_UNIT_CHARS,
+        ...struck?.items.length ? { unconstitutional: struck.items } : {},
         note: "\u0412 \u0430\u043A\u0442\u0456 \u043D\u0435\u043C\u0430\u0454 \u0441\u0442\u0430\u0442\u0435\u0439 \u0447\u0438 \u0440\u043E\u0437\u0434\u0456\u043B\u0456\u0432 \u2014 \u043B\u0438\u0448\u0435 \u043F\u0440\u043E\u043D\u0443\u043C\u0435\u0440\u043E\u0432\u0430\u043D\u0456 \u043F\u0443\u043D\u043A\u0442\u0438, \u0442\u043E\u0436 \u0442\u0435\u043A\u0441\u0442 \u043D\u0430\u0432\u0435\u0434\u0435\u043D\u043E \u043F\u043E\u0432\u043D\u0456\u0441\u0442\u044E. \u041E\u043A\u0440\u0435\u043C\u0438\u0439 \u043F\u0443\u043D\u043A\u0442: rada_unit \u0437 unit \xAB\u043F. N\xBB."
       } : {},
       source_url: text.sourceUrl,

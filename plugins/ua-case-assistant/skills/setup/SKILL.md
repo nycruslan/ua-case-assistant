@@ -6,6 +6,7 @@ description: >
   налаштування", "чи все працює", "чи підключені інструменти", "з чого почати", "створи папку справи",
   "нова папка справи", "підготуй робоче місце", "/setup". It checks which sources are reachable, creates
   the private case folder from the template, and hands over to case-setup.
+allowed-tools: mcp__plugin_ua-case-assistant_ua-legal-sources__*
 ---
 
 # Налаштування робочого місця
@@ -23,6 +24,7 @@ description: >
 | Плагін LEXERY | чи є скіли `ukrainian-legislation`, `ukrainian-court-practice` | запропонуй встановити (команди нижче) |
 | Браузер | чи доступні інструменти браузера | потрібен для судових порталів; скажи, що частина перевірок буде вручну |
 | Пошта суду | чи підключений Gmail | потрібен лише для моніторингу повідомлень Електронного суду |
+| Автооновлення | у `~/.claude/plugins/known_marketplaces.json` запис `ua-legal` має `"autoUpdate": true` | маркетплейси не від Anthropic за замовчуванням НЕ оновлюються, і виправлення до людини не дійдуть. Скажи увімкнути: `/plugin` → **Marketplaces** → `ua-legal` → **Enable auto-update** |
 
 Якщо `rada_status` повернув «Цивільний кодекс України» зі станом «Чинний» — джерела працюють.
 Якщо повернулась помилка — не кажи «не працює», скажи, яка саме помилка і що вона означає.
@@ -67,7 +69,7 @@ description: >
 Далі:
 
 1. Створи папку.
-2. Поклади в неї `CLAUDE.md` — скопіюй дослівно `references/case-folder-CLAUDE.md` із теки цього скіла.
+2. Поклади в неї `CLAUDE.md` — скопіюй дослівно `${CLAUDE_SKILL_DIR}/references/case-folder-CLAUDE.md`.
    Не переписуй його своїми словами: це правила, за якими працюватимуть усі скіли в цій справі.
 3. Скажи користувачу відкрити цю папку як робочу (нова сесія Claude Code саме в ній) — скіли читають
    `CASE.md` із поточної папки.

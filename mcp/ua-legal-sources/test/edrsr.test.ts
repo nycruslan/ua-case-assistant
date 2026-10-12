@@ -15,6 +15,7 @@ import {
   courtDateRange,
   filterByCase,
   findOperative,
+  grepExcerpts,
   isErdr,
   hasDecision,
   parseFound,
@@ -213,4 +214,15 @@ test("a 17-digit ЄРДР number is recognised, a court case number is not", () 
   assert.equal(isErdr("1201610002 0003529"), true);
   assert.equal(isErdr("761/45809/19"), false);
   assert.equal(isErdr(undefined), false);
+});
+
+test("nearby grep hits come back as one excerpt, not the same paragraph repeated", () => {
+  const body = `${"x".repeat(2000)} пункт 18 … пункт 18 … пункт 18 ${"y".repeat(2000)} пункт 18 ${"z".repeat(2000)}`;
+  const r = grepExcerpts(body, "пункт 18");
+  assert.equal(r.hits, 4);
+  assert.equal(r.excerpts.length, 2);
+  assert.equal(r.excerpts[0].split("пункт 18").length - 1, 3);
+  // Special characters in the needle are literal, not a pattern.
+  assert.equal(grepExcerpts("ст. 625 (3 %)", "(3 %)").hits, 1);
+  assert.equal(grepExcerpts("abc", "a.c").hits, 0);
 });
