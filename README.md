@@ -157,7 +157,8 @@ The server's source is `mcp/ua-legal-sources/`; the plugin ships a committed bun
 
 ## Licence and credits
 
-Apache-2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE).
+Apache-2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE). Data handling: [PRIVACY.md](PRIVACY.md); use and the
+"not legal advice" terms: [TERMS.md](TERMS.md).
 
 Request details for ЄДРСР and the Supreme Court positions database are ported from
 [LEXERY Ukrainian Law](https://github.com/LEXERY-AI/lexery-ukrainian-law) (Apache-2.0); their measured traps

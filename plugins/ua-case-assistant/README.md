@@ -130,4 +130,7 @@ CASE.md  INDEX.md  CHRONOLOGY.md  EVIDENCE.md  DEADLINES.md  LOG.md
 - Спільна папка — джерело істини; записи позначаються `[адвокат]` / `[клієнт]`.
 - Порожній результат означає «я не знайшов», а не «цього не існує».
 
+Політика конфіденційності — [PRIVACY.md](https://github.com/nycruslan/ua-case-assistant/blob/main/PRIVACY.md),
+умови використання — [TERMS.md](https://github.com/nycruslan/ua-case-assistant/blob/main/TERMS.md).
+
 Для Cowork: текст `skills/setup/references/case-folder-CLAUDE.md` вставляється в Project → Instructions.

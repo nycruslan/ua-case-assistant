@@ -16,6 +16,8 @@ Ukrainian. Started in Claude Cowork on 2026-09-20, developed in Claude Code sinc
 - `.mcp.json` at the repo root registers the server from source as `ua-legal-sources-dev`, so developing here
   never collides with the plugin's bundled copy.
 - `LICENSE` / `NOTICE` — Apache-2.0, plus attribution owed to LEXERY and to data.rada (CC BY 4.0).
+- `PRIVACY.md` / `TERMS.md` — linked from `plugin.json` for the directory listing. Keep them true to what the
+  server actually sends and stores (the README's "What it runs, sends and stores").
 - `docs/research-findings.md` — verified facts with sources. Ground truth only where marked tested;
   re-check anything else.
 - `plugins/ua-case-assistant/skills/setup/references/case-folder-CLAUDE.md` — the CLAUDE.md for a private case folder. It ships inside the plugin, because the setup skill copies it on a user's machine where this repo does not exist.
