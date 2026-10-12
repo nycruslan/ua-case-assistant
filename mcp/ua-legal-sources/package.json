@@ -1,6 +1,6 @@
 {
   "name": "ua-legal-sources",
-  "version": "0.7.4",
+  "version": "0.7.5",
   "description": "Local MCP server for Ukrainian legal sources (data.rada, ЄДРСР, ЛПД ВС).",
   "scripts": {
     "test": "node --experimental-strip-types --test test/*.test.ts",

@@ -13,6 +13,7 @@ import { join } from "node:path";
 
 import {
   buildIndex,
+  copyStandsIn,
   isRealDate,
   kyivToday,
   listUnits,
@@ -689,10 +690,26 @@ test("a part and a point of an article are addressable the way lawyers cite them
   const point = sliceUnit(kpk("2026-10-10"), "п. 5 ч. 1 ст. 176").occurrences[0];
   assert.equal(point.text.split("\n")[1], "5) тримання під вартою.");
   const missing = sliceUnit(kpk("2026-10-10"), "ч. 9 ст. 176").occurrences[0];
-  assert.match(missing.partNote ?? "", /показано всю статтю/);
+  assert.match(missing.partNote ?? "", /частини 1–\d+, частини 9 немає — показано всю статтю/);
+  const noPoint = sliceUnit(kpk("2026-10-10"), "п. 9 ч. 1 ст. 176").occurrences[0];
+  assert.match(noPoint.partNote ?? "", /у ч\. 1 пункту 9 не знайдено/);
   assert.equal(partAddress("Прикінцеві та перехідні положення п. 19"), undefined);
   assert.equal(partAddress("176"), undefined);
   assert.deepEqual(partAddress("статті 284 частина 2"), { article: "284", part: "2", point: undefined });
+});
+
+test("КУпАП's unnumbered parts are not reported as missing", () => {
+  // ч. 1 ст. 130 exists; КУпАП just prints its parts as paragraphs.
+  const o = sliceUnit(buildIndex(read("kupap-excerpt.txt")), "ч. 1 ст. 130").occurrences[0];
+  assert.match(o.text, /^Стаття 130\./);
+  assert.match(o.partNote ?? "", /не пронумеровано/);
+  assert.doesNotMatch(o.partNote ?? "", /не знайдено/);
+});
+
+test("a cached text never stands in for a newer redaction after a failed request", () => {
+  assert.equal(copyStandsIn(true, "2026-09-10"), true, "304: the copy is current");
+  assert.equal(copyStandsIn(false, "2026-09-10"), false, "a new redaction exists: refuse, do not mislabel");
+  assert.equal(copyStandsIn(false, undefined), true, "nobody vouched for a redaction: the copy may serve");
 });
 
 test("today is the Kyiv date, not the UTC one", () => {

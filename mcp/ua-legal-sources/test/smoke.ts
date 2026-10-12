@@ -34,6 +34,11 @@ async function step(name: string, fn: () => Promise<string>) {
   }
 }
 
+// As the server reads a current text: with the redaction its metadata names, so
+// a copy already on disk is reused instead of revalidated with a polite pause.
+const currentText = async (nreg: string) =>
+  getText(nreg, undefined, (await getMeta(nreg)).currentRedaction);
+
 console.log("=== ua-legal-sources live smoke test ===\n");
 
 // 1 ─ legislation metadata
@@ -61,7 +66,7 @@ await step("rada_resolve КУпАП rejects both archive twins", async () => {
 
 // 3 ─ the article that the archive twin would get wrong
 await step("rada_unit ст.130 КУпАП gives the CURRENT 1000-НМДГ penalty", async () => {
-  const text = await getText("8073-10");
+  const text = await currentText("8073-10");
   const u = sliceUnit(buildIndex(text.body), "130");
   assert.ok(u.found);
   assert.equal(u.ambiguous, false);
@@ -74,7 +79,7 @@ await step("rada_unit ст.130 КУпАП gives the CURRENT 1000-НМДГ penalt
 
 // 4 ─ act live, article excluded
 await step("rada_unit ст.21 КУпАП reports exclusion with the amending act", async () => {
-  const text = await getText("8073-10");
+  const text = await currentText("8073-10");
   const u = sliceUnit(buildIndex(text.body), "21");
   const o = u.occurrences[0];
   assert.ok(o?.excluded, "ст.21 must be flagged as excluded");
@@ -84,7 +89,7 @@ await step("rada_unit ст.21 КУпАП reports exclusion with the amending act
 
 // 4b ─ the superscript collision, against the live full text of ЦК
 await step("rada_unit flags the real ст.48¹/ст.481 collision in ЦК", async () => {
-  const text = await getText("435-15");
+  const text = await currentText("435-15");
   const u = sliceUnit(buildIndex(text.body), "481");
   assert.ok(u.found);
   assert.equal(u.ambiguous, true, "481 must be ambiguous in the live ЦК text");
@@ -96,7 +101,7 @@ await step("rada_unit flags the real ст.48¹/ст.481 collision in ЦК", asyn
 
 // 5 ─ historical redaction through open data
 await step("rada_unit honours a historical redaction date", async () => {
-  const now = await getText("435-15");
+  const now = await currentText("435-15");
   const then = await getText("435-15", "2015-01-01");
   assert.notEqual(now.body.length, then.body.length);
   assert.ok(sliceUnit(buildIndex(then.body), "1270").found);

@@ -338,6 +338,17 @@ export interface LawText {
  * Verified live: ЦК current text is 1 791 233 bytes, and ed20250101 is
  * 1 717 330 bytes — genuinely different documents, not a silent fallback.
  */
+/**
+ * Whether a cached copy may stand in for a text the server did not send. A 304
+ * proves it current. ☠️ On any other failure it stands in only when no caller
+ * vouched for a redaction: with `currentRedaction` known, a request means the
+ * copy holds an older (or unrecorded) redaction, and `textAsOf` would label that
+ * old text with the new redaction's date — superseded law presented as current.
+ */
+export function copyStandsIn(notModified: boolean, currentRedaction?: string): boolean {
+  return notModified || !currentRedaction;
+}
+
 export async function getText(
   nreg: string,
   edDate?: string,
@@ -372,13 +383,18 @@ export async function getText(
     return result(cached.body, cached.fetchedAt, true);
   }
 
-  const res = await request("data.rada", {
-    path,
-    ifModifiedSince: cached?.lastModified,
-  });
+  let res: Awaited<ReturnType<typeof request>>;
+  try {
+    res = await request("data.rada", {
+      path,
+      ifModifiedSince: cached?.lastModified,
+    });
+  } catch (err) {
+    if (cached && copyStandsIn(false, currentRedaction)) return result(cached.body, cached.fetchedAt, true);
+    throw err;
+  }
 
-  // 304, or any error while a copy is on disk: serve the copy rather than fail.
-  if (cached && (res.notModified || res.status !== 200)) {
+  if (cached && (res.notModified || (res.status !== 200 && copyStandsIn(false, currentRedaction)))) {
     if (res.notModified && !ed && currentRedaction) {
       await writeCache(cacheKey, { ...cached, redaction: currentRedaction });
     }
@@ -388,6 +404,10 @@ export async function getText(
     throw new SourceError(
       `data.rada: HTTP ${res.status} для тексту ${nreg}` +
         (ed ? ` (редакція ${isoFromInt(ed)})` : "") +
+        (cached
+          ? `. Збережена копія — редакція ${cached.redaction ?? "невідомої дати"}, а поточна — ` +
+            `${currentRedaction}, тож стару копію не показано`
+          : "") +
         `. Норму НЕ перевірено.`,
       "http",
     );
@@ -810,6 +830,9 @@ export function partAddress(
   return { article: art[1], part: prt[1], point: pnt?.[1] };
 }
 
+/** A numbered part line: «1. », «2-1. ». */
+const PART_LINE = /^(\d+(?:-\d+)?)\.\s/;
+
 /**
  * A part (and optionally a point) of an article. The article is sliced as
  * usual, then narrowed: a part runs from «N. » to the next numbered part, a
@@ -841,18 +864,44 @@ function slicePart(
     ...whole,
     unit: label,
     occurrences: whole.occurrences.map((o) => {
-      const partText = narrow(o.text, new RegExp(`^${esc(addr.part)}\\.\\s`), /^\d+(?:-\d+)?\.\s/);
+      const partText = narrow(o.text, new RegExp(`^${esc(addr.part)}\\.\\s`), PART_LINE);
       const pointText =
         partText && addr.point
           ? narrow(partText, new RegExp(`^${esc(addr.point)}\\)\\s`), /^\d+(?:-\d+)?\)\s/)
           : undefined;
       const narrowed = pointText ?? partText;
       if (!narrowed || (addr.point && !pointText)) {
-        return { ...o, partNote: `${label}: такої частини чи пункту в тексті не знайдено — показано всю статтю.` };
+        return { ...o, partNote: missingPart(o.text, addr, label) };
       }
       return { ...o, text: `${o.heading}\n${narrowed}`, partNote: `Показано лише ${label}; повний текст — unit «${addr.article}».` };
     }),
   };
+}
+
+/**
+ * Why a part or point could not be cut out. ☠️ КУпАП does not number its
+ * parts: they are paragraphs, a disposition ending in « -» plus its sanction.
+ * «Not found» there read as «ч. 1 ст. 130 does not exist», so say which case
+ * it is. Parts are never guessed from paragraphs — a wrong part in a citation
+ * is worse than the whole article.
+ */
+function missingPart(
+  text: string,
+  addr: { article: string; part: string; point?: string },
+  label: string,
+): string {
+  const parts = text.split("\n").flatMap((l) => PART_LINE.exec(l)?.[1] ?? []);
+  if (!parts.length) {
+    return (
+      `${label}: частини цієї статті в тексті не пронумеровано (вони йдуть абзацами, як у КУпАП) — показано всю ` +
+      `статтю. У статті із санкцією частина — це диспозиція разом із її санкцією («тягне за собою…»). Визнач ` +
+      `ч. ${addr.part} за текстом і цитуй дослівно.`
+    );
+  }
+  if (!parts.includes(addr.part)) {
+    return `${label}: у статті є частини ${parts[0]}–${parts[parts.length - 1]}, частини ${addr.part} немає — показано всю статтю.`;
+  }
+  return `${label}: у ч. ${addr.part} пункту ${addr.point} не знайдено — показано всю статтю.`;
 }
 
 /** Structural headings matching a user's address, best match first. */

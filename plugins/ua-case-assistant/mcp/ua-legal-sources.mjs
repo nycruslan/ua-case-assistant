@@ -1,7 +1,7 @@
 // package.json
 var package_default = {
   name: "ua-legal-sources",
-  version: "0.7.4",
+  version: "0.7.5",
   description: "Local MCP server for Ukrainian legal sources (data.rada, \u0404\u0414\u0420\u0421\u0420, \u041B\u041F\u0414 \u0412\u0421).",
   scripts: {
     test: "node --experimental-strip-types --test test/*.test.ts",
@@ -722,6 +722,9 @@ async function getCard(nreg) {
   memSet(key, card);
   return card;
 }
+function copyStandsIn(notModified, currentRedaction) {
+  return notModified || !currentRedaction;
+}
 async function getText(nreg, edDate, currentRedaction) {
   nreg = normalizeNreg(nreg);
   const ed = edDate ? edDate.replace(/-/g, "") : "";
@@ -741,11 +744,17 @@ async function getText(nreg, edDate, currentRedaction) {
   if (cached && (ed || currentRedaction && cached.redaction === currentRedaction)) {
     return result(cached.body, cached.fetchedAt, true);
   }
-  const res = await request("data.rada", {
-    path,
-    ifModifiedSince: cached?.lastModified
-  });
-  if (cached && (res.notModified || res.status !== 200)) {
+  let res;
+  try {
+    res = await request("data.rada", {
+      path,
+      ifModifiedSince: cached?.lastModified
+    });
+  } catch (err) {
+    if (cached && copyStandsIn(false, currentRedaction)) return result(cached.body, cached.fetchedAt, true);
+    throw err;
+  }
+  if (cached && (res.notModified || res.status !== 200 && copyStandsIn(false, currentRedaction))) {
     if (res.notModified && !ed && currentRedaction) {
       await writeCache(cacheKey, { ...cached, redaction: currentRedaction });
     }
@@ -753,7 +762,7 @@ async function getText(nreg, edDate, currentRedaction) {
   }
   if (res.status !== 200) {
     throw new SourceError(
-      `data.rada: HTTP ${res.status} \u0434\u043B\u044F \u0442\u0435\u043A\u0441\u0442\u0443 ${nreg}` + (ed ? ` (\u0440\u0435\u0434\u0430\u043A\u0446\u0456\u044F ${isoFromInt(ed)})` : "") + `. \u041D\u043E\u0440\u043C\u0443 \u041D\u0415 \u043F\u0435\u0440\u0435\u0432\u0456\u0440\u0435\u043D\u043E.`,
+      `data.rada: HTTP ${res.status} \u0434\u043B\u044F \u0442\u0435\u043A\u0441\u0442\u0443 ${nreg}` + (ed ? ` (\u0440\u0435\u0434\u0430\u043A\u0446\u0456\u044F ${isoFromInt(ed)})` : "") + (cached ? `. \u0417\u0431\u0435\u0440\u0435\u0436\u0435\u043D\u0430 \u043A\u043E\u043F\u0456\u044F \u2014 \u0440\u0435\u0434\u0430\u043A\u0446\u0456\u044F ${cached.redaction ?? "\u043D\u0435\u0432\u0456\u0434\u043E\u043C\u043E\u0457 \u0434\u0430\u0442\u0438"}, \u0430 \u043F\u043E\u0442\u043E\u0447\u043D\u0430 \u2014 ${currentRedaction}, \u0442\u043E\u0436 \u0441\u0442\u0430\u0440\u0443 \u043A\u043E\u043F\u0456\u044E \u043D\u0435 \u043F\u043E\u043A\u0430\u0437\u0430\u043D\u043E` : "") + `. \u041D\u043E\u0440\u043C\u0443 \u041D\u0415 \u043F\u0435\u0440\u0435\u0432\u0456\u0440\u0435\u043D\u043E.`,
       "http"
     );
   }
@@ -981,6 +990,7 @@ function partAddress(spec) {
   if (rest.replace(/[\s,]/g, "")) return void 0;
   return { article: art[1], part: prt[1], point: pnt?.[1] };
 }
+var PART_LINE = /^(\d+(?:-\d+)?)\.\s/;
 function slicePart(index, addr) {
   const whole = sliceUnit(index, addr.article);
   if (!whole.found) return whole;
@@ -1003,16 +1013,26 @@ function slicePart(index, addr) {
     ...whole,
     unit: label,
     occurrences: whole.occurrences.map((o) => {
-      const partText = narrow(o.text, new RegExp(`^${esc(addr.part)}\\.\\s`), /^\d+(?:-\d+)?\.\s/);
+      const partText = narrow(o.text, new RegExp(`^${esc(addr.part)}\\.\\s`), PART_LINE);
       const pointText = partText && addr.point ? narrow(partText, new RegExp(`^${esc(addr.point)}\\)\\s`), /^\d+(?:-\d+)?\)\s/) : void 0;
       const narrowed = pointText ?? partText;
       if (!narrowed || addr.point && !pointText) {
-        return { ...o, partNote: `${label}: \u0442\u0430\u043A\u043E\u0457 \u0447\u0430\u0441\u0442\u0438\u043D\u0438 \u0447\u0438 \u043F\u0443\u043D\u043A\u0442\u0443 \u0432 \u0442\u0435\u043A\u0441\u0442\u0456 \u043D\u0435 \u0437\u043D\u0430\u0439\u0434\u0435\u043D\u043E \u2014 \u043F\u043E\u043A\u0430\u0437\u0430\u043D\u043E \u0432\u0441\u044E \u0441\u0442\u0430\u0442\u0442\u044E.` };
+        return { ...o, partNote: missingPart(o.text, addr, label) };
       }
       return { ...o, text: `${o.heading}
 ${narrowed}`, partNote: `\u041F\u043E\u043A\u0430\u0437\u0430\u043D\u043E \u043B\u0438\u0448\u0435 ${label}; \u043F\u043E\u0432\u043D\u0438\u0439 \u0442\u0435\u043A\u0441\u0442 \u2014 unit \xAB${addr.article}\xBB.` };
     })
   };
+}
+function missingPart(text2, addr, label) {
+  const parts = text2.split("\n").flatMap((l) => PART_LINE.exec(l)?.[1] ?? []);
+  if (!parts.length) {
+    return `${label}: \u0447\u0430\u0441\u0442\u0438\u043D\u0438 \u0446\u0456\u0454\u0457 \u0441\u0442\u0430\u0442\u0442\u0456 \u0432 \u0442\u0435\u043A\u0441\u0442\u0456 \u043D\u0435 \u043F\u0440\u043E\u043D\u0443\u043C\u0435\u0440\u043E\u0432\u0430\u043D\u043E (\u0432\u043E\u043D\u0438 \u0439\u0434\u0443\u0442\u044C \u0430\u0431\u0437\u0430\u0446\u0430\u043C\u0438, \u044F\u043A \u0443 \u041A\u0423\u043F\u0410\u041F) \u2014 \u043F\u043E\u043A\u0430\u0437\u0430\u043D\u043E \u0432\u0441\u044E \u0441\u0442\u0430\u0442\u0442\u044E. \u0423 \u0441\u0442\u0430\u0442\u0442\u0456 \u0456\u0437 \u0441\u0430\u043D\u043A\u0446\u0456\u0454\u044E \u0447\u0430\u0441\u0442\u0438\u043D\u0430 \u2014 \u0446\u0435 \u0434\u0438\u0441\u043F\u043E\u0437\u0438\u0446\u0456\u044F \u0440\u0430\u0437\u043E\u043C \u0456\u0437 \u0457\u0457 \u0441\u0430\u043D\u043A\u0446\u0456\u0454\u044E (\xAB\u0442\u044F\u0433\u043D\u0435 \u0437\u0430 \u0441\u043E\u0431\u043E\u044E\u2026\xBB). \u0412\u0438\u0437\u043D\u0430\u0447 \u0447. ${addr.part} \u0437\u0430 \u0442\u0435\u043A\u0441\u0442\u043E\u043C \u0456 \u0446\u0438\u0442\u0443\u0439 \u0434\u043E\u0441\u043B\u0456\u0432\u043D\u043E.`;
+  }
+  if (!parts.includes(addr.part)) {
+    return `${label}: \u0443 \u0441\u0442\u0430\u0442\u0442\u0456 \u0454 \u0447\u0430\u0441\u0442\u0438\u043D\u0438 ${parts[0]}\u2013${parts[parts.length - 1]}, \u0447\u0430\u0441\u0442\u0438\u043D\u0438 ${addr.part} \u043D\u0435\u043C\u0430\u0454 \u2014 \u043F\u043E\u043A\u0430\u0437\u0430\u043D\u043E \u0432\u0441\u044E \u0441\u0442\u0430\u0442\u0442\u044E.`;
+  }
+  return `${label}: \u0443 \u0447. ${addr.part} \u043F\u0443\u043D\u043A\u0442\u0443 ${addr.point} \u043D\u0435 \u0437\u043D\u0430\u0439\u0434\u0435\u043D\u043E \u2014 \u043F\u043E\u043A\u0430\u0437\u0430\u043D\u043E \u0432\u0441\u044E \u0441\u0442\u0430\u0442\u0442\u044E.`;
 }
 function findHeadings(index, spec) {
   const needle = normHeading(spec);
