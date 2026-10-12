@@ -189,6 +189,12 @@ Mac. 16 findings; each re-checked here before fixing. Verified:
 - **Warning:** no icon; only the *first* save or submission sets the listing icon, so it was added before
   submitting (`.claude-plugin/icon.png`, 1024×1024).
 - claude.ai chat does not run local MCP servers; the portal marks the plugin «not on claude.ai» for its tools.
+- **Second validation (0.7.0): 0 blocking, policy hold `MCP_FORWARDS_CREDENTIAL_ENV` ×2.** The scanner reads the
+  bundle as text: `= process.env` passed as a whole object (cache and proxy defaults) plus any remote URL in the
+  file (the `$schema` draft-07 URL in `tools/list`) reads as "a credential leaving the machine in two steps".
+  Fixed by reading named variables only and dropping `$schema` (MCP defaults a schema without one to 2020-12).
+  `npm run check-plugin` now fails on a whole-`process.env` read or a host the README does not disclose.
+  `documentationUrl`/`supportUrl` are reported as unrecognized but the directory reads them: keep.
 
 ### Engineering findings that cost real debugging time
 - **Superseded diagnosis, kept as a warning:** roughly a third of Node requests to data.rada died with

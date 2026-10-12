@@ -53,6 +53,18 @@ const walk = (dir: string): string[] =>
 const tooBig = walk(pluginRoot).filter((f) => statSync(f).size > 256 * 1024);
 if (tooBig.length) throw new Error(`files over 256 KiB, held by the directory: ${tooBig.join(", ")}`);
 
+// The directory also holds a server that reads the whole environment object
+// near a remote URL ("a credential leaving the machine"). Read named variables
+// only, and contact no host but the four sources the README discloses.
+const bundleText = readFileSync(join(pluginRoot, "mcp", "ua-legal-sources.mjs"), "utf8");
+if (/process\.env(?![.[])/.test(bundleText)) {
+  throw new Error("the bundle reads the whole process.env; read named variables only");
+}
+const SOURCES = ["data.rada.gov.ua", "zakon.rada.gov.ua", "lpd.court.gov.ua", "lpd-api-prod.court.gov.ua", "reyestr.court.gov.ua"];
+const hosts = [...new Set([...bundleText.matchAll(/https?:\/\/([a-z0-9.-]+)/gi)].map((m) => m[1].toLowerCase()))];
+const foreign = hosts.filter((h) => !SOURCES.includes(h));
+if (foreign.length) throw new Error(`the bundle names hosts the README does not disclose: ${foreign.join(", ")}`);
+
 const command = expand(entry.command);
 console.log(`command: ${entry.command}`);
 console.log(`      → ${command}`);

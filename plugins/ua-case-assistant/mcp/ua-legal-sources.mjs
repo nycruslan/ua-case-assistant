@@ -1,7 +1,7 @@
 // package.json
 var package_default = {
   name: "ua-legal-sources",
-  version: "0.7.0",
+  version: "0.7.1",
   description: "Local MCP server for Ukrainian legal sources (data.rada, \u0404\u0414\u0420\u0421\u0420, \u041B\u041F\u0414 \u0412\u0421).",
   scripts: {
     test: "node --experimental-strip-types --test test/*.test.ts",
@@ -95,7 +95,11 @@ function serve(info, tools2, invalid) {
             name,
             title,
             description,
-            inputSchema: { $schema: "http://json-schema.org/draft-07/schema#", ...inputSchema },
+            // No $schema: MCP reads a schema without one as JSON Schema
+            // 2020-12, and these keywords mean the same in every draft. A
+            // schema URL in the bundle also reads as a remote host to the
+            // plugin directory's scanner.
+            inputSchema,
             annotations
           }))
         });
@@ -182,7 +186,13 @@ function flatten(res) {
   }
   return out;
 }
-function proxyFor(target, env = process.env) {
+var proxyEnv = () => ({
+  HTTPS_PROXY: process.env.HTTPS_PROXY,
+  https_proxy: process.env.https_proxy,
+  NO_PROXY: process.env.NO_PROXY,
+  no_proxy: process.env.no_proxy
+});
+function proxyFor(target, env = proxyEnv()) {
   const raw = env.HTTPS_PROXY ?? env.https_proxy;
   if (!raw) return void 0;
   const host = target.hostname.toLowerCase();
@@ -471,7 +481,10 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
-function cacheRoot(env = process.env) {
+function cacheRoot(env = {
+  UA_LEGAL_CACHE_DIR: process.env.UA_LEGAL_CACHE_DIR,
+  CLAUDE_PLUGIN_DATA: process.env.CLAUDE_PLUGIN_DATA
+}) {
   const usable = (dir) => dir && isAbsolute(dir) && !dir.includes("${") ? dir : void 0;
   const pluginData = usable(env.CLAUDE_PLUGIN_DATA);
   return usable(env.UA_LEGAL_CACHE_DIR) ?? (pluginData ? join(pluginData, "cache") : join(homedir(), ".cache", "ua-legal-sources"));

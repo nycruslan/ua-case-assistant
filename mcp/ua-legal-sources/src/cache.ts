@@ -28,7 +28,14 @@ import { isAbsolute, join } from "node:path";
  * unexpanded `${…}`, a relative path) is skipped: writes there failed
  * silently, and every call fetched a whole code again.
  */
-export function cacheRoot(env: NodeJS.ProcessEnv = process.env): string {
+export function cacheRoot(
+  // Named variables only, never the whole environment: the plugin directory
+  // holds a server that reads the environment object for credential review.
+  env: { UA_LEGAL_CACHE_DIR?: string; CLAUDE_PLUGIN_DATA?: string } = {
+    UA_LEGAL_CACHE_DIR: process.env.UA_LEGAL_CACHE_DIR,
+    CLAUDE_PLUGIN_DATA: process.env.CLAUDE_PLUGIN_DATA,
+  },
+): string {
   const usable = (dir?: string) => (dir && isAbsolute(dir) && !dir.includes("${") ? dir : undefined);
   const pluginData = usable(env.CLAUDE_PLUGIN_DATA);
   return (

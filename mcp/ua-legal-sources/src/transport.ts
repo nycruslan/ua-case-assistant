@@ -112,13 +112,28 @@ function flatten(res: IncomingMessage): Record<string, string> {
   return out;
 }
 
+interface ProxyEnv {
+  HTTPS_PROXY?: string;
+  https_proxy?: string;
+  NO_PROXY?: string;
+  no_proxy?: string;
+}
+
+const proxyEnv = (): ProxyEnv => ({
+  HTTPS_PROXY: process.env.HTTPS_PROXY,
+  https_proxy: process.env.https_proxy,
+  NO_PROXY: process.env.NO_PROXY,
+  no_proxy: process.env.no_proxy,
+});
+
 /**
  * The proxy to use for `target`, from HTTPS_PROXY / NO_PROXY, if any.
  *
  * Cloud sandboxes reach the internet only through such a proxy; connecting
- * directly there fails with ENOTFOUND.
+ * directly there fails with ENOTFOUND. Only these four variables are read, never
+ * the whole environment (see `cacheRoot`).
  */
-export function proxyFor(target: URL, env = process.env): URL | undefined {
+export function proxyFor(target: URL, env: ProxyEnv = proxyEnv()): URL | undefined {
   const raw = env.HTTPS_PROXY ?? env.https_proxy;
   if (!raw) return undefined;
   const host = target.hostname.toLowerCase();

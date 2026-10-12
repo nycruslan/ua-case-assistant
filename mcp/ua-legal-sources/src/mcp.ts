@@ -147,7 +147,11 @@ export function serve(
             name,
             title,
             description,
-            inputSchema: { $schema: "http://json-schema.org/draft-07/schema#", ...inputSchema },
+            // No $schema: MCP reads a schema without one as JSON Schema
+            // 2020-12, and these keywords mean the same in every draft. A
+            // schema URL in the bundle also reads as a remote host to the
+            // plugin directory's scanner.
+            inputSchema,
             annotations,
           })),
         });
