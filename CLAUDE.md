@@ -88,8 +88,10 @@ cd ~/Cases/<case-name> && claude    # then: /ua-case-assistant:setup
 ```
 
 ## Remaining work
-- Publish: push to `github.com/nycruslan/ua-case-assistant`, then submit to the community marketplace at
-  clau.de/plugin-directory-submission. Tag releases with `claude plugin tag --push`.
+- Directory: submitted through `claude.ai/directory/manage` (repo `nycruslan/ua-case-assistant`, path
+  `plugins/ua-case-assistant`, tracks `main`). Expected policy holds, by design: the `HTTPS_PROXY` credential
+  and the launcher (see `docs/research-findings.md`, 2026-10-12). Any new hold or blocking finding after a push
+  is a regression. Tag releases with `claude plugin tag --push`.
 - Optional: a `.mcpb` desktop extension is no longer needed for Cowork — Cowork installs the same GitHub
   marketplace, and the bundled server has no dependencies.
 - Optional: `claude plugin eval` prompts for the 10 skills. LEXERY's `evals/` is a good model, and two of its

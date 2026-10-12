@@ -183,18 +183,26 @@ Mac. 16 findings; each re-checked here before fixing. Verified:
   157 KiB, our code 112 KiB. Even SDK + our code exceeds the limit, so the server now implements the MCP stdio
   protocol itself (`src/mcp.ts`, zero runtime dependencies) and ships at ~130 KiB.
 - **Hold:** a server started through `sh <script>`; the command is now the script file itself.
-- **Hold that remains while the plugin is a subfolder:** a launcher that uses variables other than
-  `${CLAUDE_PLUGIN_ROOT}`, command substitution, or runs another file is held for a reviewer. The launcher must
-  do all three to find Node, so it is explained to the reviewer rather than removed.
+- **Hold that remains:** "Scripts the validator couldn't follow". A file the launcher runs in turn (the bundle)
+  is never followed and always goes to a reviewer, wherever the plugin sits in the repo; variables and
+  command substitution in the launcher are held too. The launcher must do all three to find Node, so a
+  reviewer sees it on every submission.
 - **Warning:** no icon; only the *first* save or submission sets the listing icon, so it was added before
   submitting (`.claude-plugin/icon.png`, 1024×1024).
 - claude.ai chat does not run local MCP servers; the portal marks the plugin «not on claude.ai» for its tools.
 - **Second validation (0.7.0): 0 blocking, policy hold `MCP_FORWARDS_CREDENTIAL_ENV` ×2.** The scanner reads the
   bundle as text: `= process.env` passed as a whole object (cache and proxy defaults) plus any remote URL in the
   file (the `$schema` draft-07 URL in `tools/list`) reads as "a credential leaving the machine in two steps".
-  Fixed by reading named variables only and dropping `$schema` (MCP defaults a schema without one to 2020-12).
-  `npm run check-plugin` now fails on a whole-`process.env` read or a host the README does not disclose.
-  `documentationUrl`/`supportUrl` are reported as unrecognized but the directory reads them: keep.
+  Reading named variables only and dropping `$schema` (MCP defaults a schema without one to 2020-12) removed
+  that trigger; `npm run check-plugin` now fails on a whole-`process.env` read or a host the README does not
+  disclose.
+- **Third validation (0.7.1): the same hold, now for `HTTPS_PROXY`.** A proxy URL can carry a login, and the
+  bundle spells `http://${raw}` (the proxy's own address). This one is real and kept: proxy credentials go only
+  to the proxy the user configured, which is the case the portal says a reviewer confirms. Dropping proxy
+  support would break corporate networks and cloud sandboxes and still leave the launcher hold.
+- **Final state (0.7.3, `cbc3a35`): 0 blocking, 2 holds (proxy credential, launcher).** The four listing fields
+  (`documentationUrl`, `supportUrl`, `privacyPolicyUrl`, `termsOfServiceUrl`) show as "unrecognized" because
+  Claude Code ignores them; the directory reads them: keep. Listed on Claude Code and Cowork only.
 
 ### Engineering findings that cost real debugging time
 - **Superseded diagnosis, kept as a warning:** roughly a third of Node requests to data.rada died with

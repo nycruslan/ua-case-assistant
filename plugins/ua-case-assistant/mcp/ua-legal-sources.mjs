@@ -1,7 +1,7 @@
 // package.json
 var package_default = {
   name: "ua-legal-sources",
-  version: "0.7.3",
+  version: "0.7.4",
   description: "Local MCP server for Ukrainian legal sources (data.rada, \u0404\u0414\u0420\u0421\u0420, \u041B\u041F\u0414 \u0412\u0421).",
   scripts: {
     test: "node --experimental-strip-types --test test/*.test.ts",

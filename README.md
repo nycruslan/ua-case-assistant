@@ -50,9 +50,8 @@ verification method these skills build on:
 **Requirements:** a paid Claude plan (plugins), and **Node.js 20+** for the bundled MCP server. Nothing to
 `npm install` — the server ships as one pre-built file with no dependencies.
 
-**Platforms:** tested on macOS. The tools start through a POSIX `sh` launcher, so Linux should behave the
-same; on Windows the ten skills work, but the tools need `sh` on `PATH` (WSL or Git Bash) and are untested
-there.
+**Platforms:** tested on macOS. The tools start through a POSIX shell launcher, so Linux should behave the
+same. On native Windows only the ten skills work; for the tools, run Claude Code inside WSL (untested).
 
 ## What you get
 
