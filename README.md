@@ -124,6 +124,10 @@ and [`mcp/ua-legal-sources/README.md`](mcp/ua-legal-sources/README.md).
   (Supreme Court positions: the search text) and `reyestr.court.gov.ua` (court register: search terms, case or
   ЄРДР number, judge, dates). Search terms come from the user's question and may include their case number.
   Case documents never leave the machine. No telemetry, no calls to the author. Honours `HTTPS_PROXY`.
+- **Falls back** to Claude's own browser and web search when the server is unavailable or a source needs a
+  person (a CAPTCHA): the skills tell Claude to search official domains (`rada.gov.ua`, `court.gov.ua` and
+  other `*.gov.ua` state sites) for law, decisions and case status. Those requests go through Claude's tools
+  under the user's Claude account, not through the plugin.
 - **Stores** law texts in the plugin's data directory (`~/.claude/plugins/data/…/cache`, else
   `~/.cache/ua-legal-sources`); court decisions are
   never written to disk.

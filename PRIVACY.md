@@ -23,6 +23,10 @@
 обробляють запити за власними правилами. Якщо задано `HTTPS_PROXY`, запити йдуть через цей проксі, а логін і
 пароль з його адреси надсилаються лише йому.
 
+Якщо сервер недоступний або джерело вимагає людини (капча), скіли просять Claude шукати на офіційних
+державних сайтах (`rada.gov.ua`, `court.gov.ua`, інші `*.gov.ua`) його власним браузером і web search. Ці
+запити йдуть через інструменти Claude у вашому обліковому записі, а не через плагін.
+
 **Що зберігається.** Тексти законів кешуються на диску (`~/.claude/plugins/data/…/cache` або
 `~/.cache/ua-legal-sources`). Судові рішення з ЄДРСР на диск не записуються — лише в пам'яті на час сесії.
 Кеш можна видалити будь-коли. Видалення плагіна в Claude Code прибирає `~/.claude/plugins/data/…`; теку
@@ -47,6 +51,10 @@ else: `data.rada.gov.ua` (act number, redaction date), `zakon.rada.gov.ua` (act 
 (search text) and `reyestr.court.gov.ua` (search terms, case or ЄРДР number, judge, dates). Claude builds the
 queries from your question, so they may include your case number. Those sites handle requests under their own
 rules. If `HTTPS_PROXY` is set, requests go through that proxy, and any credentials in its URL go only to it.
+
+When the server is unavailable or a source needs a person (a CAPTCHA), the skills ask Claude to search
+official state sites (`rada.gov.ua`, `court.gov.ua`, other `*.gov.ua`) with its own browser and web search.
+Those requests go through Claude's tools under your Claude account, not through the plugin.
 
 **What is stored.** Law texts are cached on disk (`~/.claude/plugins/data/…/cache` or
 `~/.cache/ua-legal-sources`). Court decisions are never written to disk, only held in memory for the session.
