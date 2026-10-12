@@ -18,60 +18,69 @@ set -eu
 DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 SERVER="$DIR/mcp/ua-legal-sources.mjs"
 
-find_node() {
-  if command -v node >/dev/null 2>&1; then
-    command -v node
-    return 0
+MIN_NODE=20
+
+# The first Node that is new enough wins. ☠️ Taking simply the first Node found
+# let an old system or Homebrew Node shadow a current one from a version
+# manager further down the list, and the server refused to start.
+NODE=""
+TOO_OLD=""
+try_node() {
+  [ -n "$NODE" ] && return 0
+  [ -n "${1:-}" ] && [ -x "$1" ] || return 0
+  major=$("$1" -p 'process.versions.node.split(".")[0]' 2>/dev/null) || return 0
+  if [ "$major" -ge "$MIN_NODE" ] 2>/dev/null; then
+    NODE=$1
+  elif [ -z "$TOO_OLD" ]; then
+    TOO_OLD="$1 ($("$1" -v 2>/dev/null || echo "?"))"
   fi
-  for candidate in \
-    "$HOME/.local/share/mise/shims/node" \
-    "$HOME/.volta/bin/node" \
-    "$HOME/.asdf/shims/node" \
-    "$HOME/.local/bin/node" \
-    /opt/homebrew/bin/node \
-    /usr/local/bin/node \
-    /usr/bin/node
-  do
-    if [ -x "$candidate" ]; then
-      printf '%s\n' "$candidate"
-      return 0
-    fi
-  done
-  for mgr in "$HOME/.local/bin/mise" /opt/homebrew/bin/mise; do
-    if [ -x "$mgr" ]; then
-      "$mgr" which node 2>/dev/null && return 0
-    fi
-  done
-  # nvm and fnm keep one directory per version and no shim: take the newest.
-  newest=$(
-    for candidate in \
+  return 0
+}
+
+try_node "$(command -v node 2>/dev/null || true)"
+for candidate in \
+  "$HOME/.local/share/mise/shims/node" \
+  "$HOME/.volta/bin/node" \
+  "$HOME/.asdf/shims/node" \
+  "$HOME/.local/bin/node" \
+  /opt/homebrew/bin/node \
+  /usr/local/bin/node \
+  /usr/bin/node
+do
+  try_node "$candidate"
+done
+for mgr in "$HOME/.local/bin/mise" /opt/homebrew/bin/mise; do
+  if [ -x "$mgr" ]; then try_node "$("$mgr" which node 2>/dev/null || true)"; fi
+done
+# nvm and fnm keep one directory per version and no shim: newest first.
+# A here-document, not a pipe, so try_node runs in this shell and keeps NODE.
+if [ -z "$NODE" ]; then
+  versions=$(
+    for c in \
       "$HOME"/.nvm/versions/node/v*/bin/node \
       "$HOME"/.local/share/fnm/node-versions/v*/installation/bin/node \
       "$HOME/Library/Application Support/fnm/node-versions"/v*/installation/bin/node
     do
-      [ -x "$candidate" ] || continue
-      version=$(printf '%s\n' "$candidate" | sed 's|.*/v\([0-9][0-9.]*\)/.*|\1|')
-      printf '%s\t%s\n' "$version" "$candidate"
-    done | sort -t . -k 1,1nr -k 2,2nr -k 3,3nr | head -n 1 | cut -f 2-
+      [ -x "$c" ] || continue
+      printf '%s\t%s\n' "$(printf '%s\n' "$c" | sed 's|.*/v\([0-9][0-9.]*\)/.*|\1|')" "$c"
+    done | sort -t . -k 1,1nr -k 2,2nr -k 3,3nr | cut -f 2-
   )
-  if [ -n "$newest" ]; then
-    printf '%s\n' "$newest"
-    return 0
-  fi
-  return 1
-}
+  while IFS= read -r candidate; do
+    try_node "$candidate"
+  done <<EOF
+$versions
+EOF
+fi
 
-NODE=$(find_node) || {
+if [ -z "$NODE" ]; then
+  if [ -n "$TOO_OLD" ]; then
+    echo "ua-legal-sources: Node 20 or newer is required. Found only $TOO_OLD." >&2
+    exit 1
+  fi
   echo "ua-legal-sources: Node.js not found. Install Node 20 or newer." >&2
   echo "  If Node is installed via a version manager, make sure its shims" >&2
   echo "  directory exists, or install Node system-wide." >&2
   exit 127
-}
-
-MAJOR=$("$NODE" -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)
-if [ "$MAJOR" -lt 20 ]; then
-  echo "ua-legal-sources: Node $("$NODE" -v) is too old; 20 or newer is required." >&2
-  exit 1
 fi
 
 if [ ! -f "$SERVER" ]; then

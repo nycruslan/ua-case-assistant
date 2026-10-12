@@ -29,6 +29,11 @@ jobs:
           node-version: 24
           cache: npm
           cache-dependency-path: mcp/ua-legal-sources/package-lock.json
+      # config-check and check-plugin spawn the launchers with PATH stripped, as
+      # an MCP client does. The runner's own /usr/local/bin/node is too old for
+      # the dev server, so put Node 24 where a user's install would be.
+      - name: Node 24 where the launchers look for it
+        run: mkdir -p ~/.local/bin && ln -sf "$(command -v node)" ~/.local/bin/node
       - run: npm ci
       - run: npx tsc --noEmit
       - run: npm test
