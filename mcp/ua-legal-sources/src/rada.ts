@@ -109,7 +109,6 @@ export function normalizeNreg(raw: string): string {
   return n;
 }
 
-/** True only for a date that exists in the calendar: 2025-02-30 is false. */
 /**
  * Today's date in Kyiv, YYYY-MM-DD.
  *
@@ -125,6 +124,7 @@ export function kyivToday(now = new Date()): string {
   }).format(now);
 }
 
+/** True only for a date that exists in the calendar: 2025-02-30 is false. */
 export function isRealDate(iso: string): boolean {
   const d = new Date(`${iso}T00:00:00Z`);
   return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === iso;
@@ -1238,6 +1238,20 @@ export interface Candidate {
   verified: boolean;
 }
 
+/**
+ * The card's status word for an act in force: «Чинний», «Чинна», «Діє».
+ *
+ * ☠️ A positive check, not «not repealed». Rejecting only «Втратив чинність»
+ * let through «Втратила чинність» (a feminine act such as a постанова) and
+ * «Не набрав чинності» — an adopted code that is not in force yet, which as the
+ * newest candidate was chosen over the code that actually applies.
+ */
+const IN_FORCE = /^\s*(?:чинн|діє)/i;
+const REPEALED = /втрати\S*\s+чинн/i;
+const NOT_YET = /не\s+набра\S*\s+чинн/i;
+/** Status of an older candidate whose card was not read: a newer one is in force. */
+const NOT_READ = "не перевірялось: є новіша чинна редакція";
+
 export interface ResolveResult {
   query: string;
   /** null when the registry gave an ambiguous answer instead of a 302. */
@@ -1245,6 +1259,8 @@ export interface ResolveResult {
   candidates: Candidate[];
   ambiguous: boolean;
   note: string;
+  /** Candidates past the first few, named so they can be checked by hand. */
+  unchecked?: string[];
 }
 
 /**
@@ -1339,7 +1355,7 @@ export async function resolve(
   for (const { nreg } of byNewest) {
     const card = await getCard(nreg).catch(() => undefined);
     cards.set(nreg, card);
-    if (card && !/втратив\s+чинн/i.test(card.statusText)) break;
+    if (card && IN_FORCE.test(card.statusText)) break;
   }
 
   const candidates: Candidate[] = metas.map(({ nreg, meta }) => {
@@ -1362,9 +1378,7 @@ export async function resolve(
       title: card?.title || meta.nazva,
       statusText:
         card?.statusText ||
-        (meta.isArchive
-          ? "архівна редакція"
-          : "не перевірялось: є новіша чинна редакція"),
+        (meta.isArchive ? "архівна редакція" : NOT_READ),
       isArchive: meta.isArchive,
       currentRedaction: meta.currentRedaction,
       officialNumber: meta.officialNumber,
@@ -1373,7 +1387,20 @@ export async function resolve(
   });
 
   const { chosen, note } = selectAct(candidates);
-  return { query: name, chosen, candidates, ambiguous: false, note };
+  const unchecked = nregs.slice(maxCandidates);
+  return {
+    query: name,
+    chosen,
+    candidates,
+    ambiguous: false,
+    note:
+      note +
+      (unchecked.length
+        ? ` Реєстр назвав ще ${unchecked.length} акт(и), які не перевірялись: ` +
+          `${unchecked.join(", ")}. Якщо обраний акт не той — перевір їх через rada_status.`
+        : ""),
+    ...(unchecked.length ? { unchecked } : {}),
+  };
 }
 
 /**
@@ -1389,10 +1416,7 @@ export function selectAct(candidates: Candidate[]): {
   note: string;
 } {
   const live = candidates.filter(
-    (c) =>
-      c.verified &&
-      c.isArchive === false &&
-      !/втратив\s+чинн/i.test(c.statusText),
+    (c) => c.verified && c.isArchive === false && IN_FORCE.test(c.statusText),
   );
   const chosen =
     live.length > 0
@@ -1402,9 +1426,12 @@ export function selectAct(candidates: Candidate[]): {
       : null;
 
   const archived = candidates.filter((c) => c.isArchive === true).length;
-  const repealed = candidates.filter(
-    (c) => c.verified && /втратив\s+чинн/i.test(c.statusText),
-  ).length;
+  const checked = candidates.filter((c) => c.verified && c.isArchive === false && c.statusText !== NOT_READ);
+  const repealed = checked.filter((c) => REPEALED.test(c.statusText)).length;
+  const notYet = checked.filter((c) => NOT_YET.test(c.statusText)).length;
+  const otherStatus = checked.filter(
+    (c) => !IN_FORCE.test(c.statusText) && !REPEALED.test(c.statusText) && !NOT_YET.test(c.statusText),
+  );
   const unverified = candidates.filter((c) => !c.verified).length;
   const notes: string[] = [];
 
@@ -1417,6 +1444,17 @@ export function selectAct(candidates: Candidate[]): {
   }
   if (repealed > 0) {
     notes.push(`Відкинуто ${repealed} акт(и), що втратили чинність.`);
+  }
+  if (notYet > 0) {
+    notes.push(
+      `Відкинуто ${notYet} акт(и), що ще не набрали чинності — їхні норми поки не ` +
+        `застосовуються; скажи про них користувачу, якщо питання про майбутнє.`,
+    );
+  }
+  if (otherStatus.length > 0) {
+    notes.push(
+      `Не обрано через стан: ${otherStatus.map((c) => `${c.nreg} «${c.statusText || "стан не прочитано"}»`).join(", ")}.`,
+    );
   }
   if (unverified > 0) {
     notes.push(

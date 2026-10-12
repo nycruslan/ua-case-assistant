@@ -288,6 +288,14 @@ export async function search(
     };
   }
 
+  // ☠️ One page holds 100 rows. With more found, the rest are simply not here,
+  // and a partial list read as complete is a false «no decisions from …».
+  const partial =
+    found !== null && found > rows.length
+      ? `Реєстр знайшов ${found}, тут лише перші ${rows.length} рядків — це НЕ повний ` +
+        `список. Звузь пошук (дати, суд, суддя, точніший запит), перш ніж робити ` +
+        `висновок про те, чого серед рішень немає. `
+      : "";
   return {
     status: "ok",
     found,
@@ -295,6 +303,7 @@ export async function search(
     rows: filtered,
     note:
       erdrNote +
+      partial +
       "Посилання лише як https://reyestr.court.gov.ua/Review/<id> — URL пошуку " +
       "не існує, пошук працює тільки через POST. Процесуального стану (чи " +
       "набрало рішення сили) в ЄДРСР НЕМАЄ — це court.gov.ua/fair.",
@@ -312,6 +321,13 @@ export async function search(
  * would keep serving personal data after the court withdrew it.
  */
 const transit = new Map<string, string>();
+/**
+ * Documents being fetched right now. ☠️ They count against the budget too: the
+ * check used to read `transit.size` before the awaited fetch, so parallel calls
+ * (normal for a model) all saw 7 and fetched 10. A second call for the same id
+ * joins the fetch instead of spending another request.
+ */
+const loading = new Map<string, Promise<string>>();
 let lastDocAt = 0;
 
 /**
@@ -326,7 +342,7 @@ let lastDocAt = 0;
 const IDLE_RESET_MS = 10 * 60 * 1000;
 
 export function docsFetched(): string[] {
-  return [...transit.keys()];
+  return [...new Set([...transit.keys(), ...loading.keys()])];
 }
 
 export function resetBudget(): void {
@@ -447,41 +463,20 @@ export async function document(
   expireIdleBudget();
   let body = transit.get(id);
   if (body === undefined) {
-    if (transit.size >= MAX_DOCS) {
-      throw new SourceError(
-        `Ліміт ${MAX_DOCS} УНІКАЛЬНИХ документів на питання досягнуто. ` +
-          `Вже завантажені читаються безкоштовно: ${docsFetched().join(", ")}. ` +
-          `Новий пошук (edrsr_search) починає нове питання і скидає ліміт.`,
-        "budget",
-      );
-    }
-    const res = await request("edrsr", { path: `/Review/${id}` });
-    if (res.status !== 200) {
-      throw new SourceError(
-        `ЄДРСР: HTTP ${res.status} для документа ${id}. Не перевірено.`,
-        "http",
-      );
-    }
-    // Not counted against the budget: no document was obtained. A block is
-    // checked only here, on a page WITHOUT a decision — a decision's own text
-    // may say «доступ обмежено» (see the note on the search).
-    if (!hasDecision(res.body)) {
-      if (BLOCK.test(res.body)) {
+    let pending = loading.get(id);
+    if (!pending) {
+      if (docsFetched().length >= MAX_DOCS) {
         throw new SourceError(
-          "СТОП: реєстр показав блок-сторінку. Обхід не виконується.",
-          "blocked",
+          `Ліміт ${MAX_DOCS} УНІКАЛЬНИХ документів на питання досягнуто. ` +
+            `Вже завантажені читаються безкоштовно: ${docsFetched().join(", ")}. ` +
+            `Новий пошук (edrsr_search) починає нове питання і скидає ліміт.`,
+          "budget",
         );
       }
-      throw new SourceError(
-        `За id ${id} реєстр не показав тексту рішення: такого документа немає ` +
-          `або доступ до нього обмежено. Це НЕ доказ, що рішення не існує — ` +
-          `перевір id у результатах edrsr_search.`,
-        "unavailable",
-      );
+      pending = fetchDocument(id).finally(() => loading.delete(id));
+      loading.set(id, pending);
     }
-    body = trimChrome(htmlToText(res.body));
-    transit.set(id, body);
-    lastDocAt = Date.now();
+    body = await pending;
   }
 
   const url = `${BASE}/Review/${id}`;
@@ -525,6 +520,38 @@ export async function document(
 
   lastDocAt = Date.now();
   return { id, url, mode, text, totalChars: total, note };
+}
+
+/** Fetch one decision page. It joins the budget only once a decision is obtained. */
+async function fetchDocument(id: string): Promise<string> {
+  const res = await request("edrsr", { path: `/Review/${id}` });
+  if (res.status !== 200) {
+    throw new SourceError(
+      `ЄДРСР: HTTP ${res.status} для документа ${id}. Не перевірено.`,
+      "http",
+    );
+  }
+  // Not counted against the budget: no document was obtained. A block is
+  // checked only here, on a page WITHOUT a decision — a decision's own text
+  // may say «доступ обмежено» (see the note on the search).
+  if (!hasDecision(res.body)) {
+    if (BLOCK.test(res.body)) {
+      throw new SourceError(
+        "СТОП: реєстр показав блок-сторінку. Обхід не виконується.",
+        "blocked",
+      );
+    }
+    throw new SourceError(
+      `За id ${id} реєстр не показав тексту рішення: такого документа немає ` +
+        `або доступ до нього обмежено. Це НЕ доказ, що рішення не існує — ` +
+        `перевір id у результатах edrsr_search.`,
+      "unavailable",
+    );
+  }
+  const body = trimChrome(htmlToText(res.body));
+  transit.set(id, body);
+  lastDocAt = Date.now();
+  return body;
 }
 
 export const ANONYMISATION_NOTE =

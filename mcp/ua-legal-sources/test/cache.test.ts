@@ -20,6 +20,15 @@ test("a written entry reads back, and an old one expires", async () => {
   assert.equal(await readCache("k", 1_000), undefined);
 });
 
+test("a write lands whole and leaves no temp file behind", async () => {
+  const { readdirSync } = await import("node:fs");
+  await Promise.all([1, 2, 3].map((n) => writeCache("same", { body: `v${n}`.repeat(50_000), fetchedAt: new Date().toISOString() })));
+  assert.deepEqual(readdirSync(dir).filter((f) => f.endsWith(".tmp")), []);
+  const file = join(dir, createHash("sha256").update("same").digest("hex").slice(0, 32) + ".json");
+  const { readFileSync } = await import("node:fs");
+  assert.match(JSON.parse(readFileSync(file, "utf8")).body, /^(v1|v2|v3)+$/);
+});
+
 test("a truncated or foreign file is a miss, not a crash", async () => {
   // Same naming as cache.ts, so the junk lands exactly where "probe" lives.
   const file = join(dir, createHash("sha256").update("probe").digest("hex").slice(0, 32) + ".json");

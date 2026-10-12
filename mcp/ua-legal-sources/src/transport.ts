@@ -191,7 +191,11 @@ function tunnel(proxy: URL, target: URL, timeoutMs: number): Promise<Socket> {
 async function once(url: string, opts: HttpOptions): Promise<HttpResponse> {
   const target = new URL(url);
   const proxy = proxyFor(target);
+  // ☠️ One deadline for the whole attempt: the tunnel and the request each got a
+  // full timeoutMs, so a slow proxy stretched one attempt to twice the limit.
+  const deadline = Date.now() + opts.timeoutMs;
   const socket = proxy ? await tunnel(proxy, target, opts.timeoutMs) : undefined;
+  const remaining = Math.max(1, deadline - Date.now());
 
   return new Promise((resolve, reject) => {
     let gotResponse = false;
@@ -245,7 +249,7 @@ async function once(url: string, opts: HttpOptions): Promise<HttpResponse> {
     const timer = setTimeout(() => {
       timedOut = true;
       req.destroy(new TransportError("timeout", true, gotResponse));
-    }, opts.timeoutMs);
+    }, remaining);
 
     req.on("error", (err: Error) => {
       clearTimeout(timer);

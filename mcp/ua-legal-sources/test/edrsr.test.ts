@@ -132,6 +132,10 @@ test("filterByCase tolerates spacing in the requested number", () => {
 
 // ───────────────────────────────────────────────────────── document text
 
+test("an escaped entity is decoded once, not twice", () => {
+  assert.equal(htmlToText("<p>&amp;#8470; 5 &#8470; 6 &AMP; &laquo;x&raquo;</p>"), "&#8470; 5 № 6 & «x»");
+});
+
 test("htmlToText keeps block boundaries so the operative part stays findable", () => {
   const text = htmlToText(
     "<p>Мотивувальна частина</p><div>ПОСТАНОВИВ:</div><p>Скаргу задовольнити.</p>",

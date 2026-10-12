@@ -72,8 +72,19 @@ export const SNIPPET_CHARS = 600;
  * «понов», «роботі» / «робота» → «робот»).
  */
 export function queryStems(query: string): string[] {
-  return (query.toLowerCase().match(/[\p{L}]{3,}/gu) ?? []).map((w) => w.slice(0, 5));
+  const words = query.toLowerCase().match(/[\p{L}]{3,}/gu) ?? [];
+  // ☠️ «про», «для», «щодо» occur in nearly every position, so one of them in
+  // the query made the base's filler set look like real matches.
+  const content = words.filter((w) => !STOP_WORDS.has(w));
+  return (content.length ? content : words).map((w) => w.slice(0, 5));
 }
+
+/** Ukrainian function words of three letters or more. */
+const STOP_WORDS = new Set([
+  "або", "без", "біля", "від", "для", "його", "коли", "між", "над", "нього", "під",
+  "після", "при", "про", "проти", "так", "також", "тощо", "через", "чому", "щодо",
+  "яка", "яке", "який", "які", "якщо",
+]);
 
 /** Does any query stem occur in this text? Case-insensitive. */
 export function mentionsQuery(text: string, stems: string[]): boolean {

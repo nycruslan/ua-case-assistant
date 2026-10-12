@@ -24,20 +24,22 @@ const ENTITIES: Record<string, string> = {
  * Named entities plus numeric ones. The numeric pass matters: court decisions
  * carry things like `&#8470;` (№), and an undecoded entity would be quoted
  * verbatim into a legal document.
+ *
+ * ☠️ One pass. Decoding named entities first turned `&amp;#8470;` — the page
+ * showing the characters «&#8470;» — into `&#8470;` and then into «№».
  */
 function decode(s: string): string {
-  return s
-    .replace(
-      /&(?:nbsp|amp|quot|apos|laquo|raquo|lt|gt|mdash|ndash);/g,
-      (m) => ENTITIES[m] ?? m,
-    )
-    .replace(/&#(\d+);|&#x([0-9a-f]+);/gi, (m, dec: string, hex: string) => {
-      const code = dec ? Number(dec) : parseInt(hex, 16);
+  return s.replace(
+    /&(?:(nbsp|amp|quot|apos|laquo|raquo|lt|gt|mdash|ndash)|#(\d+)|#x([0-9a-f]+));/gi,
+    (m, name: string | undefined, dec: string | undefined, hex: string | undefined) => {
+      if (name) return ENTITIES[`&${name.toLowerCase()};`] ?? m;
+      const code = dec ? Number(dec) : parseInt(hex!, 16);
       // Leave anything outside Unicode, or a lone surrogate, exactly as it came.
       if (!Number.isInteger(code) || code < 32 || code > 0x10ffff) return m;
       if (code >= 0xd800 && code <= 0xdfff) return m;
       return String.fromCodePoint(code);
-    });
+    },
+  );
 }
 
 /** Inline markup → plain text on a single line. For text inside JSON fields. */

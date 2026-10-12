@@ -1,7 +1,7 @@
 // package.json
 var package_default = {
   name: "ua-legal-sources",
-  version: "0.7.5",
+  version: "0.7.6",
   description: "Local MCP server for Ukrainian legal sources (data.rada, \u0404\u0414\u0420\u0421\u0420, \u041B\u041F\u0414 \u0412\u0421).",
   scripts: {
     test: "node --experimental-strip-types --test test/*.test.ts",
@@ -70,6 +70,9 @@ function serve(info, tools2, invalid) {
   const send = (message) => process.stdout.write(`${JSON.stringify(message)}
 `);
   const handle = async (msg) => {
+    if (!msg || typeof msg !== "object" || Array.isArray(msg)) {
+      return { jsonrpc: "2.0", id: null, error: { code: -32600, message: "Invalid Request" } };
+    }
     if (msg.id === void 0 || typeof msg.method !== "string") return void 0;
     const reply = (result) => ({ jsonrpc: "2.0", id: msg.id, result });
     const failure = (code, message) => ({
@@ -128,12 +131,17 @@ function serve(info, tools2, invalid) {
       send({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "Parse error" } });
       return;
     }
+    const answerOne = (m) => handle(m).catch((err) => ({
+      jsonrpc: "2.0",
+      id: m?.id ?? null,
+      error: { code: -32603, message: `Internal error: ${err?.message ?? err}` }
+    }));
     if (Array.isArray(parsed)) {
-      const answers = (await Promise.all(parsed.map((m) => handle(m)))).filter(Boolean);
+      const answers = (await Promise.all(parsed.map(answerOne))).filter(Boolean);
       if (answers.length) send(answers);
       return;
     }
-    const answer = await handle(parsed);
+    const answer = await answerOne(parsed);
     if (answer) send(answer);
   });
   lines.on("close", () => process.exit(0));
@@ -240,7 +248,9 @@ function tunnel(proxy, target, timeoutMs) {
 async function once(url, opts) {
   const target = new URL(url);
   const proxy = proxyFor(target);
+  const deadline = Date.now() + opts.timeoutMs;
   const socket = proxy ? await tunnel(proxy, target, opts.timeoutMs) : void 0;
+  const remaining = Math.max(1, deadline - Date.now());
   return new Promise((resolve2, reject) => {
     let gotResponse = false;
     let timedOut = false;
@@ -284,7 +294,7 @@ async function once(url, opts) {
     const timer = setTimeout(() => {
       timedOut = true;
       req.destroy(new TransportError("timeout", true, gotResponse));
-    }, opts.timeoutMs);
+    }, remaining);
     req.on("error", (err) => {
       clearTimeout(timer);
       reject(
@@ -478,7 +488,7 @@ function encodeNreg(nreg) {
 
 // src/cache.ts
 import { createHash } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 function cacheRoot(env = {
@@ -524,10 +534,15 @@ async function readCache(key, maxAgeMs) {
 }
 async function writeCache(key, value) {
   remember(key, value);
+  const file = keyPath(key);
+  const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
   try {
     await mkdir(ROOT, { recursive: true });
-    await writeFile(keyPath(key), JSON.stringify(value), "utf8");
+    await writeFile(tmp, JSON.stringify(value), "utf8");
+    await rename(tmp, file);
   } catch {
+    await rm(tmp, { force: true }).catch(() => {
+    });
   }
 }
 var mem = /* @__PURE__ */ new Map();
@@ -559,14 +574,15 @@ var ENTITIES = {
 };
 function decode(s) {
   return s.replace(
-    /&(?:nbsp|amp|quot|apos|laquo|raquo|lt|gt|mdash|ndash);/g,
-    (m) => ENTITIES[m] ?? m
-  ).replace(/&#(\d+);|&#x([0-9a-f]+);/gi, (m, dec, hex) => {
-    const code = dec ? Number(dec) : parseInt(hex, 16);
-    if (!Number.isInteger(code) || code < 32 || code > 1114111) return m;
-    if (code >= 55296 && code <= 57343) return m;
-    return String.fromCodePoint(code);
-  });
+    /&(?:(nbsp|amp|quot|apos|laquo|raquo|lt|gt|mdash|ndash)|#(\d+)|#x([0-9a-f]+));/gi,
+    (m, name, dec, hex) => {
+      if (name) return ENTITIES[`&${name.toLowerCase()};`] ?? m;
+      const code = dec ? Number(dec) : parseInt(hex, 16);
+      if (!Number.isInteger(code) || code < 32 || code > 1114111) return m;
+      if (code >= 55296 && code <= 57343) return m;
+      return String.fromCodePoint(code);
+    }
+  );
 }
 function stripTags(html) {
   if (typeof html !== "string") return "";
@@ -1255,6 +1271,10 @@ function listUnits(index, filter) {
   }
   return out;
 }
+var IN_FORCE = /^\s*(?:чинн|діє)/i;
+var REPEALED = /втрати\S*\s+чинн/i;
+var NOT_YET = /не\s+набра\S*\s+чинн/i;
+var NOT_READ = "\u043D\u0435 \u043F\u0435\u0440\u0435\u0432\u0456\u0440\u044F\u043B\u043E\u0441\u044C: \u0454 \u043D\u043E\u0432\u0456\u0448\u0430 \u0447\u0438\u043D\u043D\u0430 \u0440\u0435\u0434\u0430\u043A\u0446\u0456\u044F";
 function parseNregList(body) {
   try {
     const v = JSON.parse(body);
@@ -1311,7 +1331,7 @@ async function resolve(name, maxCandidates = 4) {
   for (const { nreg } of byNewest) {
     const card = await getCard(nreg).catch(() => void 0);
     cards.set(nreg, card);
-    if (card && !/втратив\s+чинн/i.test(card.statusText)) break;
+    if (card && IN_FORCE.test(card.statusText)) break;
   }
   const candidates = metas.map(({ nreg, meta }) => {
     const card = cards.get(nreg);
@@ -1329,7 +1349,7 @@ async function resolve(name, maxCandidates = 4) {
     return {
       nreg: meta.nreg,
       title: card?.title || meta.nazva,
-      statusText: card?.statusText || (meta.isArchive ? "\u0430\u0440\u0445\u0456\u0432\u043D\u0430 \u0440\u0435\u0434\u0430\u043A\u0446\u0456\u044F" : "\u043D\u0435 \u043F\u0435\u0440\u0435\u0432\u0456\u0440\u044F\u043B\u043E\u0441\u044C: \u0454 \u043D\u043E\u0432\u0456\u0448\u0430 \u0447\u0438\u043D\u043D\u0430 \u0440\u0435\u0434\u0430\u043A\u0446\u0456\u044F"),
+      statusText: card?.statusText || (meta.isArchive ? "\u0430\u0440\u0445\u0456\u0432\u043D\u0430 \u0440\u0435\u0434\u0430\u043A\u0446\u0456\u044F" : NOT_READ),
       isArchive: meta.isArchive,
       currentRedaction: meta.currentRedaction,
       officialNumber: meta.officialNumber,
@@ -1337,19 +1357,30 @@ async function resolve(name, maxCandidates = 4) {
     };
   });
   const { chosen, note } = selectAct(candidates);
-  return { query: name, chosen, candidates, ambiguous: false, note };
+  const unchecked = nregs.slice(maxCandidates);
+  return {
+    query: name,
+    chosen,
+    candidates,
+    ambiguous: false,
+    note: note + (unchecked.length ? ` \u0420\u0435\u0454\u0441\u0442\u0440 \u043D\u0430\u0437\u0432\u0430\u0432 \u0449\u0435 ${unchecked.length} \u0430\u043A\u0442(\u0438), \u044F\u043A\u0456 \u043D\u0435 \u043F\u0435\u0440\u0435\u0432\u0456\u0440\u044F\u043B\u0438\u0441\u044C: ${unchecked.join(", ")}. \u042F\u043A\u0449\u043E \u043E\u0431\u0440\u0430\u043D\u0438\u0439 \u0430\u043A\u0442 \u043D\u0435 \u0442\u043E\u0439 \u2014 \u043F\u0435\u0440\u0435\u0432\u0456\u0440 \u0457\u0445 \u0447\u0435\u0440\u0435\u0437 rada_status.` : ""),
+    ...unchecked.length ? { unchecked } : {}
+  };
 }
 function selectAct(candidates) {
   const live = candidates.filter(
-    (c) => c.verified && c.isArchive === false && !/втратив\s+чинн/i.test(c.statusText)
+    (c) => c.verified && c.isArchive === false && IN_FORCE.test(c.statusText)
   );
   const chosen = live.length > 0 ? [...live].sort(
     (a, b) => b.currentRedaction.localeCompare(a.currentRedaction)
   )[0] : null;
   const archived = candidates.filter((c) => c.isArchive === true).length;
-  const repealed = candidates.filter(
-    (c) => c.verified && /втратив\s+чинн/i.test(c.statusText)
-  ).length;
+  const checked = candidates.filter((c) => c.verified && c.isArchive === false && c.statusText !== NOT_READ);
+  const repealed = checked.filter((c) => REPEALED.test(c.statusText)).length;
+  const notYet = checked.filter((c) => NOT_YET.test(c.statusText)).length;
+  const otherStatus = checked.filter(
+    (c) => !IN_FORCE.test(c.statusText) && !REPEALED.test(c.statusText) && !NOT_YET.test(c.statusText)
+  );
   const unverified = candidates.filter((c) => !c.verified).length;
   const notes = [];
   if (archived > 0) {
@@ -1359,6 +1390,16 @@ function selectAct(candidates) {
   }
   if (repealed > 0) {
     notes.push(`\u0412\u0456\u0434\u043A\u0438\u043D\u0443\u0442\u043E ${repealed} \u0430\u043A\u0442(\u0438), \u0449\u043E \u0432\u0442\u0440\u0430\u0442\u0438\u043B\u0438 \u0447\u0438\u043D\u043D\u0456\u0441\u0442\u044C.`);
+  }
+  if (notYet > 0) {
+    notes.push(
+      `\u0412\u0456\u0434\u043A\u0438\u043D\u0443\u0442\u043E ${notYet} \u0430\u043A\u0442(\u0438), \u0449\u043E \u0449\u0435 \u043D\u0435 \u043D\u0430\u0431\u0440\u0430\u043B\u0438 \u0447\u0438\u043D\u043D\u043E\u0441\u0442\u0456 \u2014 \u0457\u0445\u043D\u0456 \u043D\u043E\u0440\u043C\u0438 \u043F\u043E\u043A\u0438 \u043D\u0435 \u0437\u0430\u0441\u0442\u043E\u0441\u043E\u0432\u0443\u044E\u0442\u044C\u0441\u044F; \u0441\u043A\u0430\u0436\u0438 \u043F\u0440\u043E \u043D\u0438\u0445 \u043A\u043E\u0440\u0438\u0441\u0442\u0443\u0432\u0430\u0447\u0443, \u044F\u043A\u0449\u043E \u043F\u0438\u0442\u0430\u043D\u043D\u044F \u043F\u0440\u043E \u043C\u0430\u0439\u0431\u0443\u0442\u043D\u0454.`
+    );
+  }
+  if (otherStatus.length > 0) {
+    notes.push(
+      `\u041D\u0435 \u043E\u0431\u0440\u0430\u043D\u043E \u0447\u0435\u0440\u0435\u0437 \u0441\u0442\u0430\u043D: ${otherStatus.map((c) => `${c.nreg} \xAB${c.statusText || "\u0441\u0442\u0430\u043D \u043D\u0435 \u043F\u0440\u043E\u0447\u0438\u0442\u0430\u043D\u043E"}\xBB`).join(", ")}.`
+    );
   }
   if (unverified > 0) {
     notes.push(
@@ -1403,8 +1444,38 @@ async function call(path, body) {
 }
 var SNIPPET_CHARS = 600;
 function queryStems(query) {
-  return (query.toLowerCase().match(/[\p{L}]{3,}/gu) ?? []).map((w) => w.slice(0, 5));
+  const words = query.toLowerCase().match(/[\p{L}]{3,}/gu) ?? [];
+  const content = words.filter((w) => !STOP_WORDS.has(w));
+  return (content.length ? content : words).map((w) => w.slice(0, 5));
 }
+var STOP_WORDS = /* @__PURE__ */ new Set([
+  "\u0430\u0431\u043E",
+  "\u0431\u0435\u0437",
+  "\u0431\u0456\u043B\u044F",
+  "\u0432\u0456\u0434",
+  "\u0434\u043B\u044F",
+  "\u0439\u043E\u0433\u043E",
+  "\u043A\u043E\u043B\u0438",
+  "\u043C\u0456\u0436",
+  "\u043D\u0430\u0434",
+  "\u043D\u044C\u043E\u0433\u043E",
+  "\u043F\u0456\u0434",
+  "\u043F\u0456\u0441\u043B\u044F",
+  "\u043F\u0440\u0438",
+  "\u043F\u0440\u043E",
+  "\u043F\u0440\u043E\u0442\u0438",
+  "\u0442\u0430\u043A",
+  "\u0442\u0430\u043A\u043E\u0436",
+  "\u0442\u043E\u0449\u043E",
+  "\u0447\u0435\u0440\u0435\u0437",
+  "\u0447\u043E\u043C\u0443",
+  "\u0449\u043E\u0434\u043E",
+  "\u044F\u043A\u0430",
+  "\u044F\u043A\u0435",
+  "\u044F\u043A\u0438\u0439",
+  "\u044F\u043A\u0456",
+  "\u044F\u043A\u0449\u043E"
+]);
 function mentionsQuery(text2, stems) {
   const t = text2.toLowerCase();
   return stems.some((stem) => t.includes(stem));
@@ -1625,19 +1696,21 @@ async function search(input) {
       note: erdrNote + (substringOnly ? `\u0420\u0435\u0454\u0441\u0442\u0440 \u043F\u043E\u0432\u0435\u0440\u043D\u0443\u0432 ${rows.length} \u0440\u044F\u0434\u043A\u0456\u0432, \u0430\u043B\u0435 \u0436\u043E\u0434\u0435\u043D \u043D\u0435 \u043D\u0430\u043B\u0435\u0436\u0438\u0442\u044C \u0441\u043F\u0440\u0430\u0432\u0456 ${caseNumber} \u2014 \u043F\u043E\u0448\u0443\u043A \u0437\u0430 \u043D\u043E\u043C\u0435\u0440\u043E\u043C \u0441\u043F\u0440\u0430\u0432\u0438 \u043F\u0440\u0430\u0446\u044E\u0454 \u044F\u043A \u043F\u043E\u0448\u0443\u043A \u043F\u0456\u0434\u0440\u044F\u0434\u043A\u0430. \u0414\u043B\u044F \u0446\u0456\u0454\u0457 \u0441\u043F\u0440\u0430\u0432\u0438 \u0440\u0435\u0437\u0443\u043B\u044C\u0442\u0430\u0442 \u043D\u0443\u043B\u044C\u043E\u0432\u0438\u0439. ` : "") + "\u041D\u0423\u041B\u042C \u0440\u044F\u0434\u043A\u0456\u0432. \u0426\u0435 \xAB\u044F \u043D\u0435 \u0437\u043D\u0430\u0439\u0448\u043E\u0432\xBB, \u0430 \u043D\u0435 \xAB\u043F\u0440\u0430\u043A\u0442\u0438\u043A\u0438/\u0441\u043F\u0440\u0430\u0432\u0438 \u043D\u0435\u043C\u0430\u0454\xBB. \u041F\u0435\u0440\u0435\u0432\u0456\u0440: \u0432\u0456\u0434\u043C\u0456\u043D\u043E\u043A (\u0434\u043E\u0434\u0430\u0439 `*` \u0434\u043B\u044F \u043C\u043E\u0440\u0444\u043E\u043B\u043E\u0433\u0456\u0457), \u0441\u0442\u043E\u043F-\u0441\u043B\u043E\u0432\u0430 (\u041E\u0421\u041E\u0411\u0410, \u0410\u0414\u0420\u0415\u0421\u0410, \u0433\u0440\u043D), \u043B\u0456\u0442\u0435\u0440\u043D\u0438\u0439 \u0441\u0443\u0444\u0456\u043A\u0441 \u0443 \u043D\u043E\u043C\u0435\u0440\u0456 \u0441\u043F\u0440\u0430\u0432\u0438. \u041D\u043E\u043C\u0435\u0440 \u0404\u0420\u0414\u0420 \u0448\u0443\u043A\u0430\u0454\u0442\u044C\u0441\u044F \u044F\u043A \u0442\u0435\u043A\u0441\u0442 \u0437\u0430\u043F\u0438\u0442\u0443 (expression), \u043D\u0435 \u044F\u043A \u043D\u043E\u043C\u0435\u0440 \u0441\u043F\u0440\u0430\u0432\u0438."
     };
   }
+  const partial = found !== null && found > rows.length ? `\u0420\u0435\u0454\u0441\u0442\u0440 \u0437\u043D\u0430\u0439\u0448\u043E\u0432 ${found}, \u0442\u0443\u0442 \u043B\u0438\u0448\u0435 \u043F\u0435\u0440\u0448\u0456 ${rows.length} \u0440\u044F\u0434\u043A\u0456\u0432 \u2014 \u0446\u0435 \u041D\u0415 \u043F\u043E\u0432\u043D\u0438\u0439 \u0441\u043F\u0438\u0441\u043E\u043A. \u0417\u0432\u0443\u0437\u044C \u043F\u043E\u0448\u0443\u043A (\u0434\u0430\u0442\u0438, \u0441\u0443\u0434, \u0441\u0443\u0434\u0434\u044F, \u0442\u043E\u0447\u043D\u0456\u0448\u0438\u0439 \u0437\u0430\u043F\u0438\u0442), \u043F\u0435\u0440\u0448 \u043D\u0456\u0436 \u0440\u043E\u0431\u0438\u0442\u0438 \u0432\u0438\u0441\u043D\u043E\u0432\u043E\u043A \u043F\u0440\u043E \u0442\u0435, \u0447\u043E\u0433\u043E \u0441\u0435\u0440\u0435\u0434 \u0440\u0456\u0448\u0435\u043D\u044C \u043D\u0435\u043C\u0430\u0454. ` : "";
   return {
     status: "ok",
     found,
     countCapped: found === 1e5,
     rows: filtered,
-    note: erdrNote + "\u041F\u043E\u0441\u0438\u043B\u0430\u043D\u043D\u044F \u043B\u0438\u0448\u0435 \u044F\u043A https://reyestr.court.gov.ua/Review/<id> \u2014 URL \u043F\u043E\u0448\u0443\u043A\u0443 \u043D\u0435 \u0456\u0441\u043D\u0443\u0454, \u043F\u043E\u0448\u0443\u043A \u043F\u0440\u0430\u0446\u044E\u0454 \u0442\u0456\u043B\u044C\u043A\u0438 \u0447\u0435\u0440\u0435\u0437 POST. \u041F\u0440\u043E\u0446\u0435\u0441\u0443\u0430\u043B\u044C\u043D\u043E\u0433\u043E \u0441\u0442\u0430\u043D\u0443 (\u0447\u0438 \u043D\u0430\u0431\u0440\u0430\u043B\u043E \u0440\u0456\u0448\u0435\u043D\u043D\u044F \u0441\u0438\u043B\u0438) \u0432 \u0404\u0414\u0420\u0421\u0420 \u041D\u0415\u041C\u0410\u0404 \u2014 \u0446\u0435 court.gov.ua/fair."
+    note: erdrNote + partial + "\u041F\u043E\u0441\u0438\u043B\u0430\u043D\u043D\u044F \u043B\u0438\u0448\u0435 \u044F\u043A https://reyestr.court.gov.ua/Review/<id> \u2014 URL \u043F\u043E\u0448\u0443\u043A\u0443 \u043D\u0435 \u0456\u0441\u043D\u0443\u0454, \u043F\u043E\u0448\u0443\u043A \u043F\u0440\u0430\u0446\u044E\u0454 \u0442\u0456\u043B\u044C\u043A\u0438 \u0447\u0435\u0440\u0435\u0437 POST. \u041F\u0440\u043E\u0446\u0435\u0441\u0443\u0430\u043B\u044C\u043D\u043E\u0433\u043E \u0441\u0442\u0430\u043D\u0443 (\u0447\u0438 \u043D\u0430\u0431\u0440\u0430\u043B\u043E \u0440\u0456\u0448\u0435\u043D\u043D\u044F \u0441\u0438\u043B\u0438) \u0432 \u0404\u0414\u0420\u0421\u0420 \u041D\u0415\u041C\u0410\u0404 \u2014 \u0446\u0435 court.gov.ua/fair."
   };
 }
 var transit = /* @__PURE__ */ new Map();
+var loading = /* @__PURE__ */ new Map();
 var lastDocAt = 0;
 var IDLE_RESET_MS = 10 * 60 * 1e3;
 function docsFetched() {
-  return [...transit.keys()];
+  return [.../* @__PURE__ */ new Set([...transit.keys(), ...loading.keys()])];
 }
 function resetBudget() {
   transit.clear();
@@ -1687,34 +1760,18 @@ async function document(id, mode = "head", needle) {
   expireIdleBudget();
   let body = transit.get(id);
   if (body === void 0) {
-    if (transit.size >= MAX_DOCS) {
-      throw new SourceError(
-        `\u041B\u0456\u043C\u0456\u0442 ${MAX_DOCS} \u0423\u041D\u0406\u041A\u0410\u041B\u042C\u041D\u0418\u0425 \u0434\u043E\u043A\u0443\u043C\u0435\u043D\u0442\u0456\u0432 \u043D\u0430 \u043F\u0438\u0442\u0430\u043D\u043D\u044F \u0434\u043E\u0441\u044F\u0433\u043D\u0443\u0442\u043E. \u0412\u0436\u0435 \u0437\u0430\u0432\u0430\u043D\u0442\u0430\u0436\u0435\u043D\u0456 \u0447\u0438\u0442\u0430\u044E\u0442\u044C\u0441\u044F \u0431\u0435\u0437\u043A\u043E\u0448\u0442\u043E\u0432\u043D\u043E: ${docsFetched().join(", ")}. \u041D\u043E\u0432\u0438\u0439 \u043F\u043E\u0448\u0443\u043A (edrsr_search) \u043F\u043E\u0447\u0438\u043D\u0430\u0454 \u043D\u043E\u0432\u0435 \u043F\u0438\u0442\u0430\u043D\u043D\u044F \u0456 \u0441\u043A\u0438\u0434\u0430\u0454 \u043B\u0456\u043C\u0456\u0442.`,
-        "budget"
-      );
-    }
-    const res = await request("edrsr", { path: `/Review/${id}` });
-    if (res.status !== 200) {
-      throw new SourceError(
-        `\u0404\u0414\u0420\u0421\u0420: HTTP ${res.status} \u0434\u043B\u044F \u0434\u043E\u043A\u0443\u043C\u0435\u043D\u0442\u0430 ${id}. \u041D\u0435 \u043F\u0435\u0440\u0435\u0432\u0456\u0440\u0435\u043D\u043E.`,
-        "http"
-      );
-    }
-    if (!hasDecision(res.body)) {
-      if (BLOCK.test(res.body)) {
+    let pending = loading.get(id);
+    if (!pending) {
+      if (docsFetched().length >= MAX_DOCS) {
         throw new SourceError(
-          "\u0421\u0422\u041E\u041F: \u0440\u0435\u0454\u0441\u0442\u0440 \u043F\u043E\u043A\u0430\u0437\u0430\u0432 \u0431\u043B\u043E\u043A-\u0441\u0442\u043E\u0440\u0456\u043D\u043A\u0443. \u041E\u0431\u0445\u0456\u0434 \u043D\u0435 \u0432\u0438\u043A\u043E\u043D\u0443\u0454\u0442\u044C\u0441\u044F.",
-          "blocked"
+          `\u041B\u0456\u043C\u0456\u0442 ${MAX_DOCS} \u0423\u041D\u0406\u041A\u0410\u041B\u042C\u041D\u0418\u0425 \u0434\u043E\u043A\u0443\u043C\u0435\u043D\u0442\u0456\u0432 \u043D\u0430 \u043F\u0438\u0442\u0430\u043D\u043D\u044F \u0434\u043E\u0441\u044F\u0433\u043D\u0443\u0442\u043E. \u0412\u0436\u0435 \u0437\u0430\u0432\u0430\u043D\u0442\u0430\u0436\u0435\u043D\u0456 \u0447\u0438\u0442\u0430\u044E\u0442\u044C\u0441\u044F \u0431\u0435\u0437\u043A\u043E\u0448\u0442\u043E\u0432\u043D\u043E: ${docsFetched().join(", ")}. \u041D\u043E\u0432\u0438\u0439 \u043F\u043E\u0448\u0443\u043A (edrsr_search) \u043F\u043E\u0447\u0438\u043D\u0430\u0454 \u043D\u043E\u0432\u0435 \u043F\u0438\u0442\u0430\u043D\u043D\u044F \u0456 \u0441\u043A\u0438\u0434\u0430\u0454 \u043B\u0456\u043C\u0456\u0442.`,
+          "budget"
         );
       }
-      throw new SourceError(
-        `\u0417\u0430 id ${id} \u0440\u0435\u0454\u0441\u0442\u0440 \u043D\u0435 \u043F\u043E\u043A\u0430\u0437\u0430\u0432 \u0442\u0435\u043A\u0441\u0442\u0443 \u0440\u0456\u0448\u0435\u043D\u043D\u044F: \u0442\u0430\u043A\u043E\u0433\u043E \u0434\u043E\u043A\u0443\u043C\u0435\u043D\u0442\u0430 \u043D\u0435\u043C\u0430\u0454 \u0430\u0431\u043E \u0434\u043E\u0441\u0442\u0443\u043F \u0434\u043E \u043D\u044C\u043E\u0433\u043E \u043E\u0431\u043C\u0435\u0436\u0435\u043D\u043E. \u0426\u0435 \u041D\u0415 \u0434\u043E\u043A\u0430\u0437, \u0449\u043E \u0440\u0456\u0448\u0435\u043D\u043D\u044F \u043D\u0435 \u0456\u0441\u043D\u0443\u0454 \u2014 \u043F\u0435\u0440\u0435\u0432\u0456\u0440 id \u0443 \u0440\u0435\u0437\u0443\u043B\u044C\u0442\u0430\u0442\u0430\u0445 edrsr_search.`,
-        "unavailable"
-      );
+      pending = fetchDocument(id).finally(() => loading.delete(id));
+      loading.set(id, pending);
     }
-    body = trimChrome(htmlToText(res.body));
-    transit.set(id, body);
-    lastDocAt = Date.now();
+    body = await pending;
   }
   const url = `${BASE}/Review/${id}`;
   const total = body.length;
@@ -1746,6 +1803,31 @@ async function document(id, mode = "head", needle) {
   }
   lastDocAt = Date.now();
   return { id, url, mode, text: text2, totalChars: total, note };
+}
+async function fetchDocument(id) {
+  const res = await request("edrsr", { path: `/Review/${id}` });
+  if (res.status !== 200) {
+    throw new SourceError(
+      `\u0404\u0414\u0420\u0421\u0420: HTTP ${res.status} \u0434\u043B\u044F \u0434\u043E\u043A\u0443\u043C\u0435\u043D\u0442\u0430 ${id}. \u041D\u0435 \u043F\u0435\u0440\u0435\u0432\u0456\u0440\u0435\u043D\u043E.`,
+      "http"
+    );
+  }
+  if (!hasDecision(res.body)) {
+    if (BLOCK.test(res.body)) {
+      throw new SourceError(
+        "\u0421\u0422\u041E\u041F: \u0440\u0435\u0454\u0441\u0442\u0440 \u043F\u043E\u043A\u0430\u0437\u0430\u0432 \u0431\u043B\u043E\u043A-\u0441\u0442\u043E\u0440\u0456\u043D\u043A\u0443. \u041E\u0431\u0445\u0456\u0434 \u043D\u0435 \u0432\u0438\u043A\u043E\u043D\u0443\u0454\u0442\u044C\u0441\u044F.",
+        "blocked"
+      );
+    }
+    throw new SourceError(
+      `\u0417\u0430 id ${id} \u0440\u0435\u0454\u0441\u0442\u0440 \u043D\u0435 \u043F\u043E\u043A\u0430\u0437\u0430\u0432 \u0442\u0435\u043A\u0441\u0442\u0443 \u0440\u0456\u0448\u0435\u043D\u043D\u044F: \u0442\u0430\u043A\u043E\u0433\u043E \u0434\u043E\u043A\u0443\u043C\u0435\u043D\u0442\u0430 \u043D\u0435\u043C\u0430\u0454 \u0430\u0431\u043E \u0434\u043E\u0441\u0442\u0443\u043F \u0434\u043E \u043D\u044C\u043E\u0433\u043E \u043E\u0431\u043C\u0435\u0436\u0435\u043D\u043E. \u0426\u0435 \u041D\u0415 \u0434\u043E\u043A\u0430\u0437, \u0449\u043E \u0440\u0456\u0448\u0435\u043D\u043D\u044F \u043D\u0435 \u0456\u0441\u043D\u0443\u0454 \u2014 \u043F\u0435\u0440\u0435\u0432\u0456\u0440 id \u0443 \u0440\u0435\u0437\u0443\u043B\u044C\u0442\u0430\u0442\u0430\u0445 edrsr_search.`,
+      "unavailable"
+    );
+  }
+  const body = trimChrome(htmlToText(res.body));
+  transit.set(id, body);
+  lastDocAt = Date.now();
+  return body;
 }
 var ANONYMISATION_NOTE = "\u0410\u043D\u043E\u043D\u0456\u043C\u0456\u0437\u0430\u0446\u0456\u044F (\u0441\u0442. 7 \u0417\u0423 \u2116 3262-IV): \u044F\u043A\u0449\u043E \u0434\u043E\u043A\u0443\u043C\u0435\u043D\u0442 \u043C\u0456\u0441\u0442\u0438\u0442\u044C \u0441\u043F\u0440\u0430\u0432\u0436\u043D\u0456 \u043F\u0435\u0440\u0441\u043E\u043D\u0430\u043B\u044C\u043D\u0456 \u0434\u0430\u043D\u0456, \u041D\u0415 \u043F\u0435\u0440\u0435\u043D\u043E\u0441\u0438 \u0457\u0445 \u0443 \u0432\u0456\u0434\u043F\u043E\u0432\u0456\u0434\u044C \u0456 \u041D\u0406\u041A\u041E\u041B\u0418 \u043D\u0435 \u0437\u0432'\u044F\u0437\u0443\u0439 \u041E\u0421\u041E\u0411\u0410_N \u043C\u0456\u0436 \u0440\u0456\u0437\u043D\u0438\u043C\u0438 \u0434\u043E\u043A\u0443\u043C\u0435\u043D\u0442\u0430\u043C\u0438.";
 

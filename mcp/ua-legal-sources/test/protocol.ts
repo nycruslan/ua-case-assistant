@@ -5,7 +5,9 @@
  */
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { spawn } from "node:child_process";
 import { join } from "node:path";
+import { createInterface } from "node:readline";
 
 const transport = new StdioClientTransport({
   command: process.execPath,
@@ -41,4 +43,23 @@ console.log("\n=== refused before any request ===");
 console.log(parsed.error, "·", parsed.reminder);
 
 await client.close();
+
+// Malformed input must get a JSON-RPC error, never end the server: valid JSON
+// that is not a message, a batch holding one, and garbage.
+const raw = spawn(process.execPath, ["--experimental-strip-types", join(import.meta.dirname, "..", "src", "index.ts")], {
+  stdio: ["pipe", "pipe", "inherit"],
+});
+const replies = createInterface({ input: raw.stdout! })[Symbol.asyncIterator]();
+const next = async () => JSON.parse((await replies.next()).value as string);
+for (const [line, expected] of [["null", -32600], ["[null]", -32600], ["5", -32600], ["{not json", -32700]] as const) {
+  raw.stdin!.write(`${line}\n`);
+  const reply = await next();
+  const error = Array.isArray(reply) ? reply[0].error : reply.error;
+  if (error?.code !== expected) throw new Error(`${line}: expected ${expected}, got ${JSON.stringify(reply)}`);
+}
+raw.stdin!.write(`${JSON.stringify({ jsonrpc: "2.0", id: 9, method: "ping" })}\n`);
+if ((await next()).id !== 9) throw new Error("the server stopped answering after malformed input");
+raw.stdin!.end();
+console.log("=== malformed messages answered with errors; server still up ===");
+
 console.log("\n✔ MCP protocol surface OK");

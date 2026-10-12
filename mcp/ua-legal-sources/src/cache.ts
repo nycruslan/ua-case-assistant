@@ -13,7 +13,7 @@
  * is sliced locally at zero network cost.
  */
 import { createHash } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 
@@ -103,11 +103,18 @@ export async function readCache(
 
 export async function writeCache(key: string, value: CachedText): Promise<void> {
   remember(key, value);
+  // ☠️ Write-then-rename: two servers on one machine (a Claude Code and a Cowork
+  // session) writing a 1.8 MB code in place could leave a torn file. A rename
+  // within one directory is atomic, so a reader sees the old file or the new one.
+  const file = keyPath(key);
+  const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
   try {
     await mkdir(ROOT, { recursive: true });
-    await writeFile(keyPath(key), JSON.stringify(value), "utf8");
+    await writeFile(tmp, JSON.stringify(value), "utf8");
+    await rename(tmp, file);
   } catch {
     // A cache miss must never fail a lookup; losing the cache is not an error.
+    await rm(tmp, { force: true }).catch(() => {});
   }
 }
 

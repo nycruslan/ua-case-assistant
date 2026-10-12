@@ -1,0 +1,15 @@
+# Keeps the pinned action SHAs and the server's dev dependencies current. The
+# server has no runtime dependencies, so nothing here reaches users directly.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+  - package-ecosystem: npm
+    directory: /mcp/ua-legal-sources
+    schedule:
+      interval: monthly
+    groups:
+      dev-dependencies:
+        patterns: ["*"]

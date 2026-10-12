@@ -57,6 +57,9 @@ Ukrainian. Started in Claude Cowork on 2026-09-20, developed in Claude Code sinc
   that way — the directory inspects only readable files under 256 KiB, and the SDK alone exceeded that.
   `@modelcontextprotocol/sdk` stays a dev dependency, used by the tests as the reference client.
 - After changing either `.mcp.json`: `npm run check-config` (dev) and `npm run check-plugin` (shipped).
+- CI (`.github/workflows/ci.yml`) runs that offline gauntlet on every push and PR, including "bundle matches
+  the source" and strict validation; actions are pinned by SHA and Dependabot keeps them current. Keep it
+  green: the directory scans `main` and can auto-publish it once approved.
 - Editing the server's source does not affect the running one: Claude Code spawns it at startup, so reload
   the app to pick up changes.
 - Never loosen a rate limit or the ЄДРСР no-disk-cache rule to make something faster. Those are the contract

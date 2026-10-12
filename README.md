@@ -146,7 +146,8 @@ is never de-anonymised or linked across documents.
 
 ```bash
 cd mcp/ua-legal-sources && npm install
-npm test              # 97 unit tests on recorded fixtures, no network
+npm test              # unit tests on recorded fixtures, no network
+npm run check-protocol # the MCP surface, including malformed input
 npm run check-config  # the repo's dev .mcp.json launches the server
 npm run build         # rebuild the bundle the plugin ships
 npm run check-plugin  # the BUNDLED plugin server, spawned as a client would
@@ -156,7 +157,8 @@ claude plugin validate ./plugins/ua-case-assistant
 
 The server's source is `mcp/ua-legal-sources/`; the plugin ships a committed bundle at
 `plugins/ua-case-assistant/mcp/ua-legal-sources.mjs`. **Run `npm run build` after changing `src/`** —
-`npm run check-plugin` fails if the bundle is older than the source.
+`npm run check-plugin` fails if the bundle is older than the source. CI runs all of the offline checks on every push
+(`.github/workflows/ci.yml`).
 
 ## Licence and credits
 

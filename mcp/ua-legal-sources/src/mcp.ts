@@ -120,6 +120,12 @@ export function serve(
   const send = (message: unknown) => process.stdout.write(`${JSON.stringify(message)}\n`);
 
   const handle = async (msg: Message): Promise<unknown> => {
+    // ☠️ `null` or a number is valid JSON but not a message; reading `.id` off it
+    // threw inside the line listener, and the unhandled rejection killed the
+    // server for the rest of the session.
+    if (!msg || typeof msg !== "object" || Array.isArray(msg)) {
+      return { jsonrpc: "2.0", id: null, error: { code: -32600, message: "Invalid Request" } };
+    }
     // A notification (no id) or a response to us: nothing to answer.
     if (msg.id === undefined || typeof msg.method !== "string") return undefined;
     const reply = (result: unknown) => ({ jsonrpc: "2.0", id: msg.id, result });
@@ -182,13 +188,20 @@ export function serve(
       send({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "Parse error" } });
       return;
     }
+    // Nothing thrown here may escape: an unhandled rejection ends the process.
+    const answerOne = (m: unknown) =>
+      handle(m as Message).catch((err: Error) => ({
+        jsonrpc: "2.0",
+        id: (m as Message | null)?.id ?? null,
+        error: { code: -32603, message: `Internal error: ${err?.message ?? err}` },
+      }));
     // Older protocol versions allow batches; answer them as a batch.
     if (Array.isArray(parsed)) {
-      const answers = (await Promise.all(parsed.map((m) => handle(m as Message)))).filter(Boolean);
+      const answers = (await Promise.all(parsed.map(answerOne))).filter(Boolean);
       if (answers.length) send(answers);
       return;
     }
-    const answer = await handle(parsed as Message);
+    const answer = await answerOne(parsed);
     if (answer) send(answer);
   });
   // The client closing stdin ends the session; background work must not keep

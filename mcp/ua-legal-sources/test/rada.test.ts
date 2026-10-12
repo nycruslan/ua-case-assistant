@@ -261,6 +261,24 @@ test("selectAct rejects a repealed act and says so", () => {
   assert.match(note, /втратили чинність/);
 });
 
+test("selectAct takes only an act positively in force", () => {
+  // ☠️ «Не набрав чинності» as the newest candidate used to win over the code in force.
+  const notYet = selectAct([
+    cand({ nreg: "new", statusText: "Не набрав чинності", currentRedaction: "2027-01-01" }),
+    cand({ nreg: "old", statusText: "Чинний", currentRedaction: "2026-08-05" }),
+  ]);
+  assert.equal(notYet.chosen?.nreg, "old");
+  assert.match(notYet.note, /ще не набрали чинності/);
+  // A feminine status word: «Втратила чинність» is repealed too.
+  const repealed = selectAct([cand({ nreg: "p", statusText: "Втратила чинність" })]);
+  assert.equal(repealed.chosen, null);
+  assert.match(repealed.note, /втратили чинність/);
+  assert.equal(selectAct([cand({ statusText: "Чинна" })]).chosen?.nreg, "x");
+  const odd = selectAct([cand({ nreg: "s", statusText: "Зупинено дію" })]);
+  assert.equal(odd.chosen, null);
+  assert.match(odd.note, /s «Зупинено дію»/);
+});
+
 test("selectAct prefers the newest redaction among live candidates", () => {
   const { chosen } = selectAct([
     cand({ nreg: "a", currentRedaction: "2020-05-01" }),
@@ -557,6 +575,10 @@ test("gibberish matches no real position", () => {
 
 test("short words alone produce no stems, so nothing is filtered on them", () => {
   assert.deepEqual(queryStems("ст 12"), []);
+  // Function words never vouch for a match; a query of nothing else still searches.
+  assert.deepEqual(queryStems("позов про qwzx"), ["позов", "qwzx"]);
+  assert.ok(!mentionsQuery("Позиція про строки", queryStems("qwzx про")));
+  assert.deepEqual(queryStems("про"), ["про"]);
 });
 
 test("resolver cache: only a non-empty list of strings is trusted", () => {
