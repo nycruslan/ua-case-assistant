@@ -11,7 +11,7 @@
   kodeksy.com.ua має сторінки редакції 2019 року. Ніколи не цитуй із них.
 
 ## Судова практика
-- ЄДРСР: https://reyestr.court.gov.ua — читання `/Review/<id>` WF; пошук BR. ~137 млн документів; частина
+- ЄДРСР: https://reyestr.court.gov.ua — читання `/Review/<id>` WF; пошук BR. Частина
   рішень обмежена або публікується із затримкою.
 - База правових позицій ВС: https://lpd.court.gov.ua (BR) · API https://lpd-api-prod.court.gov.ua/api/v1 (GET — WF;
   `/legal-position/<id>`, `/document/<id>`, `/court/list`, `/digest/navigation`). Реєстрація не потрібна.
