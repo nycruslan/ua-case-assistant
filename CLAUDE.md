@@ -2,12 +2,12 @@
 
 A Claude setup for a client (non-lawyer) and their Ukrainian advocate working one legal case together:
 civil/family/property, criminal and administrative offences, commercial. Everything the agent produces is in
-Ukrainian. Started in Claude Cowork on 2026-09-20, developed in Claude Code since.
+Ukrainian.
 
 ## Layout
-- `plugins/ua-case-assistant/` — the plugin (10 skills, Ukrainian) and the bundled MCP server it ships.
+- `plugins/ua-case-assistant/` — the plugin (in Ukrainian) and the bundled MCP server it ships.
 - `.claude-plugin/marketplace.json` — local marketplace `ua-legal`, so the plugin installs in Claude Code.
-- `mcp/ua-legal-sources/` — SOURCE of the MCP server (9 tools). **Read its README before changing
+- `mcp/ua-legal-sources/` — SOURCE of the MCP server. **Read its README before changing
   anything**: the per-host TLS cap, request policy, fail-safe archive handling and article-number collision
   handling all encode findings that cost real debugging.
 - `plugins/ua-case-assistant/mcp/ua-legal-sources.mjs` — the committed bundle the plugin ships, built from
@@ -42,7 +42,8 @@ Ukrainian. Started in Claude Cowork on 2026-09-20, developed in Claude Code sinc
   `npm run check-plugin` fails on a mismatch), then `/reload-plugins`.
 - After changing the MCP server: `cd mcp/ua-legal-sources && npx tsc --noEmit && npm test`, then
   **`npm run build`** to refresh the bundle the plugin ships, then `npm run check-plugin` (it fails if the
-  bundle is older than `src/`). `npm run smoke` hits the live sources and spends real requests — run it
+  bundle is older than `src/`), and `npm run check-protocol`, which CI also runs.
+  `npm run smoke` hits the live sources and spends real requests — run it
   deliberately, not on every edit. Developing needs Node 24 (the source runs as TypeScript); the shipped
   bundle needs only Node 20.
 - Two launcher scripts, both deliberate: `mcp/ua-legal-sources/bin/start.sh` (dev, runs the TypeScript
@@ -62,18 +63,15 @@ Ukrainian. Started in Claude Cowork on 2026-09-20, developed in Claude Code sinc
   green: the directory scans `main` and can auto-publish it once approved.
 - Editing the server's source does not affect the running one: Claude Code spawns it at startup, so reload
   the app to pick up changes.
-- Never loosen a rate limit or the ЄДРСР no-disk-cache rule to make something faster. Those are the contract
-  with these sources, and the reasons are in the code comments.
 - Keep every tool result under 50 000 characters: Claude Code saves a longer text result to a file
   instead of showing it, and caps MCP output at 25 000 tokens. Anything that can grow — law units, search
   results, decision text — is bounded in the server and says when it was cut.
 - Never write `\uXXXX` escapes through an editing tool: parameters are JSON, so they decode into the raw
   (often invisible) character. Build such characters with `String.fromCharCode` / `chr()`.
-- Network etiquette for Ukrainian state sources is part of the contract: targeted requests only, no bulk
+- Network etiquette for Ukrainian state sources is the contract with them: targeted requests only, no bulk
   crawling, ≥1.1 s between ЄДРСР requests, stop on CAPTCHA/block pages, never cache ЄДРСР documents, never
-  de-anonymize `ОСОБА_N`.
-- User preferences: direct, concise, tables for comparisons, one definitive recommendation, honest tradeoffs,
-  no over-engineering.
+  de-anonymize `ОСОБА_N`. Never loosen any of this to make
+  something faster; the reasons are in the code comments.
 
 ## Setup
 Users install from the published marketplace and then run `/ua-case-assistant:setup`, which checks the
@@ -84,20 +82,14 @@ To develop against this checkout instead of an installed copy:
 claude --plugin-dir ./plugins/ua-case-assistant
 ```
 
-For real case work use a separate private folder, never this repo:
-```bash
-mkdir -p ~/Cases/<case-name> && cp plugins/ua-case-assistant/skills/setup/references/case-folder-CLAUDE.md ~/Cases/<case-name>/CLAUDE.md
-cd ~/Cases/<case-name> && claude    # then: /ua-case-assistant:setup
-```
+For real case work use a separate private folder, never this repo: run `/ua-case-assistant:setup`, which creates it from the template.
 
 ## Remaining work
 - Directory: submitted through `claude.ai/directory/manage` (repo `nycruslan/ua-case-assistant`, path
   `plugins/ua-case-assistant`, tracks `main`). Expected policy holds, by design: the `HTTPS_PROXY` credential
   and the launcher (see `docs/research-findings.md`, 2026-10-12). Any new hold or blocking finding after a push
   is a regression. Tag releases with `claude plugin tag --push`.
-- Optional: a `.mcpb` desktop extension is no longer needed for Cowork — Cowork installs the same GitHub
-  marketplace, and the bundled server has no dependencies.
-- Optional: `claude plugin eval` prompts for the 10 skills. LEXERY's `evals/` is a good model, and two of its
+- Optional: `claude plugin eval` prompts for the skills. LEXERY's `evals/` is a good model, and two of its
   cases (КУпАП ст.130 archive twin, ст.21 excluded) are already pinned as unit tests here.
 - Optional: watch `data.rada.gov.ua/laws/main/r.tsv` (feed of amended acts) so the case is told when a law it
   relies on changes. `case-monitor` step 6 does this manually today.
